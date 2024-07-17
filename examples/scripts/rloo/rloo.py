@@ -1,4 +1,5 @@
 import shutil
+import wandb
 
 from datasets import load_dataset
 from transformers import (
@@ -44,6 +45,7 @@ accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml
 
 
 if __name__ == "__main__":
+    wandb.init(project='advantage-diffusion', entity='swish')
     parser = HfArgumentParser((RLOOConfig, ModelConfig))
     config, model_config = parser.parse_args_into_dataclasses()
     # remove output_dir if exists

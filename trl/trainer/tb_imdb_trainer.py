@@ -37,16 +37,16 @@ from ..trainer.utils import (
     print_rich_table,
     truncate_response,
 )
-from .rloo_config import RLOOConfig
+from .tb_config import TBConfig
 
 
-INVALID_LOGPROB = 1.0
+INVALID_LOGPROB = 0.0
 
 
-class RLOOTrainer(Trainer):
+class TBTrainer(Trainer):
     def __init__(
         self,
-        config: RLOOConfig,
+        config: TBConfig,
         tokenizer: PreTrainedTokenizer,
         policy: nn.Module,
         ref_policy: nn.Module,
@@ -120,8 +120,8 @@ class RLOOTrainer(Trainer):
         #########
         for module in [policy, ref_policy, reward_model]:
             disable_dropout_in_model(module)
-        if args.stop_token and args.stop_token == "eos":
-            args.stop_token_id = tokenizer.eos_token_id
+        #if args.stop_token and args.stop_token == "eos":
+        args.stop_token_id = tokenizer.eos_token_id
         self.model = policy
         self.create_optimizer_and_scheduler(num_training_steps=args.num_updates)
 
@@ -157,7 +157,7 @@ class RLOOTrainer(Trainer):
             self.train_dataset,
             batch_size=self.local_dataloader_batch_size,
             shuffle=True,
-            collate_fn=DataCollatorWithPadding(tokenizer),
+            collate_fn=lambda data: {key: [d[key] for d in data] for key in data[0]},#DataCollatorWithPadding(tokenizer),
             drop_last=True,  # needed; otherwise the last batch will be of ragged shape
         )
         # sync random states for DataLoader(shuffle=True) before `accelerator.prepare`
@@ -169,7 +169,7 @@ class RLOOTrainer(Trainer):
         self.eval_dataloader = DataLoader(
             self.eval_dataset,
             batch_size=args.per_device_eval_batch_size,
-            collate_fn=DataCollatorWithPadding(self.tokenizer),
+            collate_fn=lambda data: {key: [d[key] for d in data] for key in data[0]},#DataCollatorWithPadding(self.tokenizer),
             drop_last=True,
         )  # no need to shuffle eval dataset
         self.eval_dataloader = accelerator.prepare(self.eval_dataloader)
@@ -234,7 +234,7 @@ class RLOOTrainer(Trainer):
             self.lr_scheduler.step()
             data = next(iter_dataloader)
             with torch.no_grad():
-                queries = data["input_ids"].to(device)
+                queries = torch.stack(data["input_ids"]).to(device)
                 queries = queries.repeat(args.rloo_k, 1)
                 context_length = queries.shape[1]
                 query_responses = []
@@ -296,7 +296,8 @@ class RLOOTrainer(Trainer):
                 logprobs = torch.cat(logprobs, 0)
                 ref_logprobs = torch.cat(ref_logprobs, 0)
                 sequence_lengths = torch.cat(sequence_lengths, 0)
-                scores = torch.cat(scores, 0)
+                scores = torch.cat(scores, 0)[:,0]
+
                 del (logprob, ref_logprob, score)
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -314,6 +315,7 @@ class RLOOTrainer(Trainer):
                 padding_mask = response_idxs > sequence_lengths.unsqueeze(1)
                 logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB)
                 ref_logprobs = torch.masked_fill(ref_logprobs, padding_mask, INVALID_LOGPROB)
+                p_ref_f = ref_logprobs.sum(1)
 
                 # 4. compute rewards
                 kl = logprobs - ref_logprobs
@@ -329,7 +331,7 @@ class RLOOTrainer(Trainer):
 
             # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch
             for ppo_epoch_idx in range(args.num_ppo_epochs):
-                b_inds = np.random.permutation(args.local_batch_size)
+                b_inds = np.arange(args.local_batch_size)#np.random.permutation(args.local_batch_size)
                 minibatch_idx = 0
                 for mini_batch_start in range(0, args.local_batch_size, args.local_mini_batch_size):
                     mini_batch_end = mini_batch_start + args.local_mini_batch_size
@@ -352,6 +354,15 @@ class RLOOTrainer(Trainer):
                             new_logprobs = torch.masked_fill(
                                 new_logprobs, padding_mask[micro_batch_inds], INVALID_LOGPROB
                             )
+
+                            # TB
+                            pi_f = new_logprobs.sum(1)
+                            log_Z_pred = ((-pi_f + p_ref_f) + scores/args.kl_coef).view(args.rloo_k, -1).mean(0).repeat(args.rloo_k).detach()
+                            tb_loss = ((log_Z_pred + (pi_f - p_ref_f) - scores/args.kl_coef)**2).mean()
+                            accelerator.backward(tb_loss)
+                            optimizer.step()
+                            optimizer.zero_grad()
+                            
                             new_ratio = (new_logprobs - mb_logprobs).exp()
                             new_logprobs = new_logprobs.sum(1)
                             mb_logprobs = mb_logprobs.sum(1)
@@ -361,10 +372,7 @@ class RLOOTrainer(Trainer):
                             pg_losses2 = -mb_advantage * torch.clamp(ratio, 1.0 - args.cliprange, 1.0 + args.cliprange)
                             pg_loss_max = torch.max(pg_losses, pg_losses2)
                             pg_loss = pg_loss_max.mean()
-                            loss = pg_loss
-                            accelerator.backward(loss)
-                            optimizer.step()
-                            optimizer.zero_grad()
+
                             with torch.no_grad():
                                 pg_clipfrac = (pg_losses2 > pg_losses).float().mean()
                                 prob_dist = torch.nn.functional.softmax(logits, dim=-1)
@@ -384,7 +392,7 @@ class RLOOTrainer(Trainer):
                     del (
                         output, logits, new_all_logprobs, new_logprobs,
                         logprobs_diff, ratio, pg_losses, pg_losses2,
-                        pg_loss, loss, pg_clipfrac, prob_dist, entropy, approxkl,
+                        pg_loss, pg_clipfrac, prob_dist, entropy, approxkl,
                         mb_advantage, mb_responses, mb_query_responses, mb_logprobs,
                     )
                     # fmt: on
@@ -405,6 +413,8 @@ class RLOOTrainer(Trainer):
                 metrics["policy/clipfrac_avg"] = self.accelerator.gather(pg_clipfrac_stats).mean().item()
                 metrics["loss/policy_avg"] = self.accelerator.gather(pg_loss_stats).mean().item()
                 metrics["loss/value_avg"] = self.accelerator.gather(vf_loss_stats).mean().item()
+                metrics["loss/logZ"] = self.accelerator.gather(log_Z_pred).mean().item()
+                metrics["loss/tb_loss"] = self.accelerator.gather(tb_loss).mean().item()
                 metrics["val/clipfrac_avg"] = self.accelerator.gather(vf_clipfrac_stats).mean().item()
                 metrics["policy/entropy_avg"] = self.accelerator.gather(entropy_stats).mean().item()
                 metrics["val/ratio"] = self.accelerator.gather(ratio_stats).mean().item()
@@ -419,22 +429,23 @@ class RLOOTrainer(Trainer):
             gc.collect()
 
             if args.num_sample_generations > 0 and (update - 1) % self.sample_generations_freq == 0:
-                self.generate_completions(sampling=True)
+                self.generate_completions(sampling=True, update=update)
 
-    def generate_completions(self, sampling: bool = False):
+    def generate_completions(self, sampling: bool = False, update=0):
         args = self.args
         tokenizer = self.tokenizer
         generation_config = GenerationConfig(
             max_new_tokens=self.args.response_length,
-            temperature=(0.01 + 1e-7),
+            temperature=0.8,#(0.01 + 1e-7),
             top_k=0.0,
             top_p=1.0,
             do_sample=True,
         )
+        device = self.accelerator.device
 
         table = defaultdict(list)
         for batch in self.eval_dataloader:
-            query = batch["input_ids"]
+            query = torch.stack(batch["input_ids"]).to(device)
             with torch.no_grad():
                 context_length = query.shape[1]
                 with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
@@ -466,4 +477,4 @@ class RLOOTrainer(Trainer):
             import wandb
 
             if wandb.run is not None:
-                wandb.log({"completions": wandb.Table(dataframe=df)})
+                wandb.log({"completions_"+str(update): wandb.Table(dataframe=df)})
