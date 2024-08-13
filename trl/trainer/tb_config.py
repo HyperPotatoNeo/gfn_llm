@@ -69,7 +69,7 @@ class TBConfig(OnpolicyRuntimeConfig, TrainingArguments):
     """the lambda value for GAE"""
     whiten_rewards: bool = False
     """whether to whiten the rewards"""
-    kl_coef: float = 0.05
+    kl_coef: float = 1.0
     """the KL coefficient"""
 
     # rloo config

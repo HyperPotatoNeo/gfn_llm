@@ -229,6 +229,7 @@ class TBTrainer(Trainer):
         entropy_stats = torch.zeros(stats_shape, device=device)
         ratio_stats = torch.zeros(stats_shape, device=device)
         model.train()
+        ref_policy.train()
         for update in range(1, args.num_updates + 1):
             global_step += 1 * args.batch_size
             self.lr_scheduler.step()
@@ -357,8 +358,8 @@ class TBTrainer(Trainer):
 
                             # TB
                             pi_f = new_logprobs.sum(1)
-                            log_Z_pred = ((-pi_f + p_ref_f) + scores/args.kl_coef).view(args.rloo_k, -1).mean(0).repeat(args.rloo_k).detach()
-                            tb_loss = ((log_Z_pred + (pi_f - p_ref_f) - scores/args.kl_coef)**2).mean()
+                            log_Z_pred = ((-pi_f + p_ref_f[micro_batch_inds]) + scores[micro_batch_inds]/args.kl_coef).view(args.rloo_k, -1).mean(0).repeat(args.rloo_k).detach()
+                            tb_loss = ((log_Z_pred + (pi_f - p_ref_f[micro_batch_inds]) - scores[micro_batch_start:micro_batch_end]/args.kl_coef)**2).mean()
                             accelerator.backward(tb_loss)
                             optimizer.step()
                             optimizer.zero_grad()
