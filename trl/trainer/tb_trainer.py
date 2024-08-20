@@ -90,6 +90,7 @@ class TBTrainer(Trainer):
         args.local_batch_size = (
             args.per_device_train_batch_size * args.gradient_accumulation_steps * args.num_mini_batches
         )
+        print('DEVICE: ',self.accelerator.device)
         args.micro_batch_size = int(args.per_device_train_batch_size * args.world_size)
         args.batch_size = int(args.local_batch_size * args.world_size)
         args.mini_batch_size = exact_div(
@@ -230,7 +231,10 @@ class TBTrainer(Trainer):
         ratio_stats = torch.zeros(stats_shape, device=device)
         model.train()
         ref_policy.train()
+        kl_coef_start = args.kl_coef
         for update in range(1, args.num_updates + 1):
+            if args.kl_anneal:
+                args.kl_coef = args.kl_coef_final * (update-1)/args.num_updates + kl_coef_start * (1 - (update-1)/args.num_updates)
             global_step += 1 * args.batch_size
             self.lr_scheduler.step()
             data = next(iter_dataloader)
@@ -358,6 +362,7 @@ class TBTrainer(Trainer):
 
                             # TB
                             pi_f = new_logprobs.sum(1)
+                            #log_Z_pred = ((-pi_f + p_ref_f[micro_batch_inds]) + scores[micro_batch_inds]/args.kl_coef).view(args.rloo_k, -1).logsumexp(0).repeat(args.rloo_k).detach() - np.log(args.rloo_k)
                             log_Z_pred = ((-pi_f + p_ref_f[micro_batch_inds]) + scores[micro_batch_inds]/args.kl_coef).view(args.rloo_k, -1).mean(0).repeat(args.rloo_k).detach()
                             tb_loss = ((log_Z_pred + (pi_f - p_ref_f[micro_batch_inds]) - scores[micro_batch_start:micro_batch_end]/args.kl_coef)**2).mean()
                             accelerator.backward(tb_loss)
@@ -421,6 +426,7 @@ class TBTrainer(Trainer):
                 metrics["val/ratio"] = self.accelerator.gather(ratio_stats).mean().item()
                 metrics["val/ratio_var"] = self.accelerator.gather(ratio_stats).var().item()
                 metrics["val/num_eos_tokens"] = (responses == tokenizer.eos_token_id).sum().item()
+                metrics["val/kl_coef"] = args.kl_coef
                 metrics["lr"] = self.lr_scheduler.get_last_lr()[0]
                 metrics["episode"] = global_step
                 self.state.epoch = global_step / self.train_dataset_len  # used by self.log
@@ -437,7 +443,7 @@ class TBTrainer(Trainer):
         tokenizer = self.tokenizer
         generation_config = GenerationConfig(
             max_new_tokens=self.args.response_length,
-            temperature=(0.01 + 1e-7),
+            temperature=(args.temperature + 1e-7),#(0.01 + 1e-7),
             top_k=0.0,
             top_p=1.0,
             do_sample=True,

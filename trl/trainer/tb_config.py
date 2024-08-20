@@ -71,6 +71,10 @@ class TBConfig(OnpolicyRuntimeConfig, TrainingArguments):
     """whether to whiten the rewards"""
     kl_coef: float = 1.0
     """the KL coefficient"""
+    kl_anneal: bool = False
+    """whether to anneal kl_coef"""
+    """kl_coef final value after annealing"""
+    kl_coef_final: float = 0.05
 
     # rloo config
     rloo_k: int = 2
