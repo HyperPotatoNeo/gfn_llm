@@ -53,6 +53,10 @@ class TBConfig(OnpolicyRuntimeConfig, TrainingArguments):
     """the path to the sft model"""
     use_dataset: bool = False
     """whether to use dataset responses for off-policy training"""
+    top_p_sample: bool = False
+    """whether to randomly sample top_p uniformly from [0.7-1.0] 30% of the time for off-policy training"""
+    temperature_sample: bool = False
+    """whether to randomly sample top_p uniformly from [0.7-1.0] 30% of the time for off-policy training"""
 
     # ppo config
     num_mini_batches: int = 1

@@ -247,6 +247,23 @@ class TBTrainer(Trainer):
             global_step += 1 * args.batch_size
             self.lr_scheduler.step()
             data = next(iter_dataloader)
+            
+            # Off-policy sampling
+            top_p = 1.0
+            temp = args.temperature + 1e-7
+            if args.top_p_sample and np.random.binomial(1, 0.3):
+                top_p = np.random.uniform(0.7, 1.0)
+            if args.temperature_sample and np.random.binomial(1, 0.3):
+                temp = np.random.uniform(0.7, 1.1) + 1e-7
+            generation_config = GenerationConfig(
+                max_new_tokens=args.response_length,
+                min_new_tokens=args.response_length,
+                temperature=temp,
+                top_k=0.0,
+                top_p=top_p,
+                do_sample=True,
+            )
+            
             with torch.no_grad():
                 queries = data["input_ids"].to(device)
                 queries = queries.repeat(args.rloo_k, 1)
