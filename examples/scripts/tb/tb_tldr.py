@@ -78,7 +78,7 @@ if __name__ == "__main__":
     ################
     # Dataset
     ################
-    raw_datasets = load_dataset("trl-internal-testing/tldr-preference-sft-trl-style")
+    raw_datasets = load_dataset("trl-internal-testing/tldr-preference-sft-trl-style", cache_dir="/pscratch/sd/s/siddart2")
     if config.sanity_check:
         for key in raw_datasets:
             raw_datasets[key] = raw_datasets[key].select(range(1000))
@@ -94,7 +94,19 @@ if __name__ == "__main__":
                 padding=False,
                 add_generation_prompt=True,
             )
-            return {"input_ids": input_ids, "lengths": len(input_ids)}
+            response_ids = tokenizer.apply_chat_template(
+                element["messages"][1:],
+                padding=False,
+                add_generation_prompt=False,
+            )
+            response_ids.append(0)
+            if len(response_ids) < config.response_length:
+                response_ids += [tokenizer.pad_token_id] * (config.response_length - len(response_ids))
+            
+            return {"input_ids": input_ids, 
+                    "lengths": len(input_ids), 
+                    "response_ids":response_ids,
+                    "response_lengths": len(response_ids)}
 
         return dataset.map(
             tokenize,
@@ -108,6 +120,9 @@ if __name__ == "__main__":
     # filtering
     train_dataset = train_dataset.filter(lambda x: x["lengths"] <= 512)
     eval_dataset = eval_dataset.filter(lambda x: x["lengths"] <= 512)
+    train_dataset = train_dataset.filter(lambda x: x["response_lengths"] <= config.response_length)
+    eval_dataset = eval_dataset.filter(lambda x: x["response_lengths"] <= config.response_length)
+
     assert train_dataset[0]["input_ids"][-1] != tokenizer.eos_token_id, "The last token should not be an EOS token"
     ################
     # Training

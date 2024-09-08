@@ -45,7 +45,7 @@ tokenizer = AutoTokenizer.from_pretrained(
     args.model_name_or_path,
     revision=args.model_revision,
 )
-raw_datasets = load_dataset("trl-internal-testing/tldr-preference-sft-trl-style")
+raw_datasets = load_dataset("trl-internal-testing/tldr-preference-sft-trl-style", cache_dir="/pscratch/sd/s/siddart2")
 prompts = raw_datasets["test"]["prompt"]
 if args.n is not None:
     prompts = prompts[: args.n]

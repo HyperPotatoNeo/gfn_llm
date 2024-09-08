@@ -229,7 +229,12 @@ class RLOOTrainer(Trainer):
         entropy_stats = torch.zeros(stats_shape, device=device)
         ratio_stats = torch.zeros(stats_shape, device=device)
         model.train()
+        n_updates = 0
         for update in range(1, args.num_updates + 1):
+            if (n_updates+1) % (args.num_updates//10) == 0:
+                self.save_model(args.output_dir)
+                n_updates = 0
+            n_updates += 1
             global_step += 1 * args.batch_size
             self.lr_scheduler.step()
             data = next(iter_dataloader)

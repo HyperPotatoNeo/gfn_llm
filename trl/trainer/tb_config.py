@@ -51,6 +51,8 @@ class TBConfig(OnpolicyRuntimeConfig, TrainingArguments):
     """the path to the reward model"""
     sft_model_path: str = "EleutherAI/pythia-160m"
     """the path to the sft model"""
+    use_dataset: bool = False
+    """whether to use dataset responses for off-policy training"""
 
     # ppo config
     num_mini_batches: int = 1
@@ -73,8 +75,8 @@ class TBConfig(OnpolicyRuntimeConfig, TrainingArguments):
     """the KL coefficient"""
     kl_anneal: bool = False
     """whether to anneal kl_coef"""
-    """kl_coef final value after annealing"""
     kl_coef_final: float = 0.05
+    """kl_coef final value after annealing"""
 
     # rloo config
     rloo_k: int = 2

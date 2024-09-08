@@ -232,9 +232,18 @@ class TBTrainer(Trainer):
         model.train()
         ref_policy.train()
         kl_coef_start = args.kl_coef
+        logZ_k_size = (args.rloo_k-1) if args.use_dataset else args.rloo_k
+        n_updates = 0
         for update in range(1, args.num_updates + 1):
+            if (n_updates+1) % (args.num_updates//10) == 0:
+                self.save_model(args.output_dir)
+                n_updates = 0
+            n_updates += 1
             if args.kl_anneal:
-                args.kl_coef = args.kl_coef_final * (update-1)/args.num_updates + kl_coef_start * (1 - (update-1)/args.num_updates)
+                if update < args.num_updates/2:
+                    args.kl_coef = args.kl_coef_final * (update-1)/(args.num_updates/2) + kl_coef_start * (1 - (update-1)/(args.num_updates/2))
+                else:
+                    args.kl_coef = args.kl_coef_final
             global_step += 1 * args.batch_size
             self.lr_scheduler.step()
             data = next(iter_dataloader)
@@ -295,13 +304,73 @@ class TBTrainer(Trainer):
                         ref_logprobs.append(ref_logprob)
                         sequence_lengths.append(sequence_length)
                         scores.append(score)
-                query_responses = torch.cat(query_responses, 0)
-                responses = torch.cat(responses, 0)
-                postprocessed_responses = torch.cat(postprocessed_responses, 0)
-                logprobs = torch.cat(logprobs, 0)
-                ref_logprobs = torch.cat(ref_logprobs, 0)
-                sequence_lengths = torch.cat(sequence_lengths, 0)
-                scores = torch.cat(scores, 0)
+                
+                # DATASET RESPONSES
+                if args.use_dataset:
+                    offline_query_responses = []
+                    offline_responses = []
+                    offline_postprocessed_responses = []
+                    offline_logprobs = []
+                    offline_ref_logprobs = []
+                    offline_scores = []
+                    offline_sequence_lengths = []
+                    with torch.no_grad():
+                        of_response = data["response_ids"].to(device)
+                        of_query = data["input_ids"].to(device)
+                        of_query_response = torch.cat((of_query, of_response), 1)
+                        
+                        output = forward(model, of_query_response, tokenizer.pad_token_id)
+                        of_logits = output.logits[:, context_length - 1 : -1]
+                        of_logits /= args.temperature + 1e-7
+                    
+                        offline_all_logprob = F.log_softmax(of_logits, dim=-1)
+                        offline_logprob = torch.gather(offline_all_logprob, 2, of_response.unsqueeze(-1)).squeeze(-1)
+                        del of_logits, offline_all_logprob
+                        torch.cuda.empty_cache()
+                        
+                        of_ref_output = forward(ref_policy, of_query_response, tokenizer.pad_token_id)
+                        of_ref_logits = of_ref_output.logits[:, context_length - 1 : -1]
+                        of_ref_logits /= args.temperature + 1e-7
+                        of_ref_all_logprob = F.log_softmax(of_ref_logits, dim=-1)
+                        offline_ref_logprob = torch.gather(of_ref_all_logprob, 2, of_response.unsqueeze(-1)).squeeze(-1)
+                        del of_ref_output, of_ref_logits, of_ref_all_logprob
+                        torch.cuda.empty_cache()
+                    offline_sequence_length = first_true_indices(of_response == tokenizer.pad_token_id) - 1
+                    _, offline_score, _ = get_reward(
+                        reward_model, of_query_response, tokenizer.pad_token_id, context_length
+                    )
+                    offline_query_responses.append(of_query_response)
+                    offline_responses.append(of_response)
+                    offline_postprocessed_responses.append(of_response)
+                    offline_logprobs.append(offline_logprob)
+                    offline_ref_logprobs.append(offline_ref_logprob)
+                    offline_sequence_lengths.append(offline_sequence_length)
+                    offline_scores.append(offline_score)
+                
+                    query_responses = query_responses + offline_query_responses
+                    responses = responses + offline_responses
+                    postprocessed_responses = postprocessed_responses + offline_postprocessed_responses
+                    logprobs = logprobs + offline_logprobs
+                    ref_logprobs = ref_logprobs + offline_ref_logprobs
+                    sequence_lengths = sequence_lengths + offline_sequence_lengths
+                    scores = scores + offline_scores
+                        
+                if args.use_dataset:
+                    query_responses = torch.cat(query_responses, 0)[args.gradient_accumulation_steps:]
+                    responses = torch.cat(responses, 0)[args.gradient_accumulation_steps:]
+                    postprocessed_responses = torch.cat(postprocessed_responses, 0)[args.gradient_accumulation_steps:]
+                    logprobs = torch.cat(logprobs, 0)[args.gradient_accumulation_steps:]
+                    ref_logprobs = torch.cat(ref_logprobs, 0)[args.gradient_accumulation_steps:]
+                    sequence_lengths = torch.cat(sequence_lengths, 0)[args.gradient_accumulation_steps:]
+                    scores = torch.cat(scores, 0)[args.gradient_accumulation_steps:]
+                else:
+                    query_responses = torch.cat(query_responses, 0)
+                    responses = torch.cat(responses, 0)
+                    postprocessed_responses = torch.cat(postprocessed_responses, 0)
+                    logprobs = torch.cat(logprobs, 0)
+                    ref_logprobs = torch.cat(ref_logprobs, 0)
+                    sequence_lengths = torch.cat(sequence_lengths, 0)
+                    scores = torch.cat(scores, 0)
 
                 del (logprob, ref_logprob, score)
                 torch.cuda.empty_cache()
@@ -362,8 +431,7 @@ class TBTrainer(Trainer):
 
                             # TB
                             pi_f = new_logprobs.sum(1)
-                            #log_Z_pred = ((-pi_f + p_ref_f[micro_batch_inds]) + scores[micro_batch_inds]/args.kl_coef).view(args.rloo_k, -1).logsumexp(0).repeat(args.rloo_k).detach() - np.log(args.rloo_k)
-                            log_Z_pred = ((-pi_f + p_ref_f[micro_batch_inds]) + scores[micro_batch_inds]/args.kl_coef).view(args.rloo_k, -1).mean(0).repeat(args.rloo_k).detach()
+                            log_Z_pred = ((-pi_f + p_ref_f[micro_batch_inds]) + scores[micro_batch_inds]/args.kl_coef).view(args.rloo_k, -1)[:logZ_k_size].mean(0).repeat(args.rloo_k).detach()
                             tb_loss = ((log_Z_pred + (pi_f - p_ref_f[micro_batch_inds]) - scores[micro_batch_start:micro_batch_end]/args.kl_coef)**2).mean()
                             accelerator.backward(tb_loss)
                             optimizer.step()

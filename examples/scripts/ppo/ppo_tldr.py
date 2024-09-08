@@ -1,5 +1,6 @@
 import multiprocessing
 import shutil
+import wandb
 
 from datasets import load_dataset
 from transformers import (
@@ -46,6 +47,7 @@ accelerate launch --config_file examples/accelerate_configs/deepspeed_zero2.yaml
 
 
 if __name__ == "__main__":
+    wandb.init(project='trl', entity='swish')
     parser = HfArgumentParser((PPOv2Config, ModelConfig))
     config, model_config = parser.parse_args_into_dataclasses()
     # remove output_dir if exists
@@ -77,7 +79,7 @@ if __name__ == "__main__":
     ################
     # Dataset
     ################
-    raw_datasets = load_dataset("trl-internal-testing/tldr-preference-sft-trl-style")
+    raw_datasets = load_dataset("trl-internal-testing/tldr-preference-sft-trl-style", cache_dir="/pscratch/sd/s/siddart2")
     if config.sanity_check:
         for key in raw_datasets:
             raw_datasets[key] = raw_datasets[key].select(range(1000))
