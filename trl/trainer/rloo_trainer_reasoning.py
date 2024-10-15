@@ -38,9 +38,12 @@ from .utils import (
     truncate_response,
 )
 from .rloo_config import RLOOConfig
-
+import re
 
 INVALID_LOGPROB = 1.0
+FIND_NUMBERS_REGEX = re.compile(
+    r"(?:[+-]?\d+\.\d*|[+-]?\.\d+|[+-]?\d+e[-+]?\d+|[+-]?\d+)"
+)
 
 
 class RLOOTrainerReasoning(Trainer):
@@ -193,17 +196,40 @@ class RLOOTrainerReasoning(Trainer):
     def get_eval_dataloader(self) -> DataLoader:
         return self.eval_dataloader
     
-    def compare_batches(self, tensor1, tensor2):
-        # Ensure both tensors have the same shape
-        if tensor1.shape != tensor2.shape:
-            raise ValueError("Input tensors must have the same shape")
+    def grade_answer(self, given_answer, ground_truth):
+        if given_answer is None:
+            return False
+        # Compare the tensors and convert the result to integers (1 for True, 0 for False)
+        comparison = (given_answer.flatten() == ground_truth.flatten()) #.int()
+        return comparison.view(-1, 1)  # Reshape to (64, 1)
+    
+    def extract_predicted_answer_from_text(self, text: str, use_original_format:bool=False) -> Optional[str]:
+        if use_original_format:
+            # Extract the final answer based on ####
+            if "####" not in text:
+                return None
+            parts = text.split("####")
+            assert len(parts) >= 2
+            return parts[-1].strip()
+
+        text = text.replace(",", "")
+        pred_answer = FIND_NUMBERS_REGEX.findall(text)  # TODO: add task to attributes
+        if len(pred_answer) == 0:
+            return None
+        else:
+            # Pick the last number
+            pred_answer = pred_answer[-1].strip()
+            return pred_answer
         
-        # Compare each sample in the batch
-        comparison = (tensor1 == tensor2).all(dim=1)  # Compare each sample (row-wise)
-        
-        # Convert boolean result to integer (1 if identical, 0 if not)
-        result = comparison.int()
-        return result
+    def extract_predicted_answers(self, texts: List[str], use_original_format: bool = False) -> List[Optional[str]]:
+        """
+        Extract predicted answers from a list of texts.
+        """
+        answers = []
+        for text in texts:
+            answer = self.extract_predicted_answer_from_text(text, use_original_format)
+            answers.append(answer)
+        return answers
 
     def train(self):
         args = self.args
@@ -256,7 +282,8 @@ class RLOOTrainerReasoning(Trainer):
                 queries = queries.repeat(args.rloo_k, 1)
                 context_length = queries.shape[1]
                 response_d = data["response_ids"].to(device)
-                response_d = response_d.repeat(args.rloo_k, 1)
+                response_d = response_d.unsqueeze(1)  # Now shape is (32, 1)
+                response_d = response_d.repeat(args.rloo_k, 1)  # Now shape is (64, 1)
                 
                 query_responses = []
                 response_d_responses = []
@@ -269,17 +296,22 @@ class RLOOTrainerReasoning(Trainer):
                 with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
                     for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size):
                         query = queries[i : i + args.local_rollout_forward_batch_size]
-                        response_raw = response_d[i : i + args.local_rollout_forward_batch_size]
+                        ground_truth = response_d[i : i + args.local_rollout_forward_batch_size]
                         query_response, logits = generate(
                             unwrapped_model,
                             query,
                             tokenizer.pad_token_id,
                             generation_config,
                         )
-                        response = query_response[:, context_length:]
-                        binary_RM = self.compare_batches(response, response_raw)
-                        import pdb; pdb.set_trace()
-
+                        pred_answer = query_response[:, context_length:]
+                        pred_answer = tokenizer.batch_decode(pred_answer, skip_special_tokens=True)
+                        pred_answer = self.extract_predicted_answers(pred_answer, 
+                                                                     use_original_format=False)
+                        pred_answer_tensor = torch.tensor([float(x) for x in pred_answer])
+                        # Reshape the tensor to (64, 1)
+                        response = pred_answer_tensor.view(len(pred_answer), 1).to(device)
+                        #ground_truth = tokenizer.batch_decode(response, skip_special_tokens=True)
+                        score = self.grade_answer(pred_answer_tensor, ground_truth) # binary_RM
 
                         # use the logits during generation directly, instead of using the following
                         all_logprob = F.log_softmax(logits, dim=-1)
@@ -308,11 +340,6 @@ class RLOOTrainerReasoning(Trainer):
                         # _, score, _ = get_reward(
                         #     reward_model, postprocessed_query_response, tokenizer.pad_token_id, context_length
                         # )
-                        import pdb; pdb.set_trace()
-                        _, score, _ = get_reward2(
-                            postprocessed_query_response, tokenizer.pad_token_id, context_length
-                        )
-
                         query_responses.append(query_response)
                         responses.append(response)
                         postprocessed_responses.append(postprocessed_response)

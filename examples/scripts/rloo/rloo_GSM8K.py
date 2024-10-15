@@ -112,6 +112,12 @@ if __name__ == "__main__":
     train_dataset = raw_datasets["train"]
     eval_dataset = raw_datasets["test"]
     
+    def parse_number(value):
+        value = value.strip()
+        # Remove commas
+        value = value.replace(',', '')
+        return float(value)
+
     def prepare_dataset(dataset, tokenizer):
         """pre-tokenize the dataset before training; only collate during training"""
 
@@ -126,30 +132,12 @@ if __name__ == "__main__":
                 padding=False,
                 add_generation_prompt=True,
             )
-            # match = re.search(r'#### (\d+)', element["answer"])
-            # # If a match is found, extract the number
-            # if match:
-            #     number = match.group(1)  # group(1) gives the part inside the parentheses
-            # else:
-            #     print("No match found")
-            number = element["answer"].split('####')[1].strip()
-            number_ex = {
-                'content': number,
-                'role': 'user'
-            }
-            response_ids = tokenizer.apply_chat_template(
-                [number_ex],
-                padding=False,
-                add_generation_prompt=False,
-            )
-            response_ids.append(0)
-            if len(response_ids) < config.response_length:
-                response_ids += [tokenizer.pad_token_id] * (config.response_length - len(response_ids))
-            
+            number = parse_number(element["answer"].split('####')[1])
+            print(element["answer"].split('####')[1], '====', number)
+
             return {"input_ids": input_ids, 
                     "lengths": len(input_ids), 
-                    "response_ids":response_ids,
-                    "response_lengths": len(response_ids)}
+                    "response_ids":number}
 
         return dataset.map(
             tokenize,
@@ -160,13 +148,13 @@ if __name__ == "__main__":
     
     train_dataset = prepare_dataset(train_dataset, tokenizer)
     eval_dataset = prepare_dataset(eval_dataset, tokenizer)
-    # filtering -> not sure how to define this tokens.
-    train_dataset = train_dataset.filter(lambda x: x["lengths"] <= 512)
-    eval_dataset = eval_dataset.filter(lambda x: x["lengths"] <= 512)
-    train_dataset = train_dataset.filter(lambda x: x["response_lengths"] <= config.response_length)
-    eval_dataset = eval_dataset.filter(lambda x: x["response_lengths"] <= config.response_length)
 
-    assert train_dataset[0]["input_ids"][-1] != tokenizer.eos_token_id, "The last token should not be an EOS token"
+    # filtering -> not sure how to define this tokens.
+    # train_dataset = train_dataset.filter(lambda x: x["lengths"] <= 512)
+    # eval_dataset = eval_dataset.filter(lambda x: x["lengths"] <= 512)
+    # train_dataset = train_dataset.filter(lambda x: x["response_lengths"] <= config.response_length)
+    # eval_dataset = eval_dataset.filter(lambda x: x["response_lengths"] <= config.response_length)
+    # assert train_dataset[0]["input_ids"][-1] != tokenizer.eos_token_id, "The last token should not be an EOS token"
 
     ################
     # Training
