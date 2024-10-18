@@ -279,8 +279,8 @@ class RLOOTrainerReasoning(Trainer):
             data = next(iter_dataloader)
             with torch.no_grad():
                 queries = data["input_ids"].to(device)
-                queries = queries.repeat(args.rloo_k, 1)
-                context_length = queries.shape[1]
+                queries = queries.repeat(args.rloo_k, 1) # torch.Size([64, 188])
+                context_length = queries.shape[1] # -> 188
                 response_d = data["response_ids"].to(device)
                 response_d = response_d.unsqueeze(1)  # Now shape is (32, 1)
                 response_d = response_d.repeat(args.rloo_k, 1)  # Now shape is (64, 1)
@@ -295,14 +295,14 @@ class RLOOTrainerReasoning(Trainer):
                 sequence_lengths = []
                 with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
                     for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size):
-                        query = queries[i : i + args.local_rollout_forward_batch_size]
-                        ground_truth = response_d[i : i + args.local_rollout_forward_batch_size]
+                        query = queries[i : i + args.local_rollout_forward_batch_size] # 64,128
+                        ground_truth = response_d[i : i + args.local_rollout_forward_batch_size] # 64,1
                         query_response, logits = generate(
                             unwrapped_model,
                             query,
                             tokenizer.pad_token_id,
                             generation_config,
-                        )
+                        ) # query_response -> [64,241]
                         pred_answer = query_response[:, context_length:]
                         pred_answer = tokenizer.batch_decode(pred_answer, skip_special_tokens=True)
                         pred_answer = self.extract_predicted_answers(pred_answer, 
