@@ -34,6 +34,9 @@ FIND_NUMBERS_REGEX = re.compile(
 
 
 """
+salloc --gres=gpu:a100l:1 --cpus-per-gpu=4 --mem=32G -t 10:00:00 --partition=unkillable
+salloc --gres=gpu:a100l:2 -c 24 --mem=32G -t 12:00:00 --partition=lab-bengioy
+
 module unload anaconda
 echo "loading modules"
 module load python/3.10 cudatoolkit/12.3.2
@@ -66,12 +69,22 @@ if __name__ == "__main__":
         padding_side="left",
         trust_remote_code=model_config.trust_remote_code,
     )
-    tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     if tokenizer.chat_template is None:
         tokenizer.chat_template = SIMPLE_QUERY_CHAT_TEMPLATE
+    
+    # Add missing special tokens if necessary
+    if tokenizer.pad_token_id is None:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
+    if tokenizer.eos_token_id is None:
+        tokenizer.add_special_tokens({"eos_token": "<eos>"})
+
     policy = AutoModelForCausalLM.from_pretrained(
         config.sft_model_path, trust_remote_code=model_config.trust_remote_code
     )
+    policy.config.pad_token_id = tokenizer.pad_token_id
+    policy.config.eos_token_id = tokenizer.eos_token_id
+
     ################
     # Dataset
     ################
@@ -113,21 +126,27 @@ if __name__ == "__main__":
     
     def grade_answer(given_answer, ground_truth):
         if given_answer is None:
-            return torch.tensor(0.0)
-        given_answer = torch.tensor(float(given_answer))
+            return torch.tensor(False)
+        else:
+            given_answer = torch.tensor(float(given_answer))
         assert ground_truth is not None
-        comparison = torch.isclose(given_answer, ground_truth, atol=1e-5)
-        return comparison.view(-1, 1)  # Reshape to (64, 1)
+        comparison = torch.isclose(given_answer, torch.tensor(ground_truth), atol=1e-5)
+        return comparison
     
     def extract_predicted_answer_from_text(text: str, use_original_format:bool=False):
         if use_original_format:
-            # Extract the final answer based on ####
-            if "####" not in text:
-                return None
-            parts = text.split("####")
-            assert len(parts) >= 2
-            return parts[-1].strip()
-
+            # Use regex to search for the first occurrence of '#### <number>'
+            match = re.search(r'#### (\d+)', text)
+            if match:
+                return float(match.group(1))  # Return the first matched number as a string
+            return None
+            # # Extract the final answer based on ####
+            # if "####" not in text:
+            #     return None
+            # parts = text.split("####")
+            # assert len(parts) >= 2
+            # return parts[-1].strip()
+        
         text = text.replace(",", "")
         pred_answer = FIND_NUMBERS_REGEX.findall(text)  # TODO: add task to attributes
         if len(pred_answer) == 0:
@@ -152,10 +171,12 @@ if __name__ == "__main__":
         queries = train_dataset["input_ids"]
         ground_truth_data = train_dataset["response_ids"] # -> len(ground_truth) 1319
         ground_truth_text = train_dataset["text_answer"]
-        raw_question = eval_dataset["raw_question"]
+        raw_question = train_dataset["raw_question"]
    
-    response_length = 53
+    response_length = 256
     temperature = 0.7
+    print("===response_length:\n", response_length)
+    print("===temperature:\n", temperature)
     generation_config = GenerationConfig(
             max_new_tokens=response_length,
             min_new_tokens=response_length,
@@ -163,11 +184,13 @@ if __name__ == "__main__":
             top_k=0.0,
             top_p=1.0,
             do_sample=True,
+            pad_token_id=tokenizer.pad_token_id,  # Set the pad token id
+            eos_token_id=tokenizer.eos_token_id,  # Set the EOS token id
         )
     
     # Initialize a list to store the scores
     scores = []
-    use_original_format = False
+    use_original_format = True
     print("===use_original_format:\n", use_original_format)
     with unwrap_model_for_generation(policy, accelerator) as unwrapped_model:
         for i in tqdm(range(0, len(queries))):
@@ -179,10 +202,10 @@ if __name__ == "__main__":
             #print("===3. context_length: ", context_length)
             ground_truth = ground_truth_data[i]
             #print("===4. ground_truth: ", ground_truth)
-            raw_question = eval_dataset["raw_question"][i]
-            #print("===5. raw_question: ", raw_question)
-            raw_question_decode = tokenizer.batch_decode(query, skip_special_tokens=True)
-            #print("===6. raw_question_decode: ", raw_question_decode[0])
+            raw_questions = eval_dataset["raw_question"][i]
+            #print("===5. raw_questions: ", raw_questions)
+            raw_question_decode = tokenizer.decode(query[0], skip_special_tokens=True)
+            #print("===6. raw_question_decode: ", raw_question_decode)
             query_response, logits = generate(
                 unwrapped_model,
                 query,
@@ -191,20 +214,19 @@ if __name__ == "__main__":
             )
             #print("===7. query_response: ", query_response)            
             pred_answer = query_response[:, context_length:]
-            #print("===8. pred_answer: ", pred_answer) 
-            pred_answer = tokenizer.batch_decode(pred_answer, skip_special_tokens=True)
-            print("===9. pred_answer: ", pred_answer) 
-            pred_answer = extract_predicted_answer_from_text(text=pred_answer[0], 
-                                                            use_original_format=use_original_format)
-            print("===10. pred_answer: ", pred_answer)    
+            #print("===8. pred_answer: ", pred_answer)
+            pred_answer = tokenizer.decode(pred_answer[0], skip_special_tokens=True)
+            #print("===9. pred_answer: ", pred_answer) 
+            pred_answer = extract_predicted_answer_from_text(text=pred_answer, use_original_format=use_original_format)
+            #print("===10. pred_answer: ", pred_answer)    
             #print("===11. ground_truth_text: ", ground_truth_text[i])
-            print("===12. ground_truth: ", torch.tensor(ground_truth))
-            score = grade_answer(pred_answer, torch.tensor(ground_truth)) # binary_RM
+            #print("===12. ground_truth: ", ground_truth)
+            score = grade_answer(pred_answer, ground_truth) # binary_RM
             #print("===13. score: ", score) 
             #print("===14. score.item(): ", score.item()) 
             scores.append(score.item())
             #print("===15. score: ", scores) 
-             # Calculate the average score
+            # Calculate the average score
             average_score = sum(scores) / len(scores)
             print(f"Average Score: {average_score}")
 print(f" Final Average Score: {average_score}")
