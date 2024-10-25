@@ -83,7 +83,7 @@ if __name__ == "__main__":
     
     def data_processing(query):
         #question_template = f'{bos_token} [MATH_TASK] Problem: {query} Solution:'
-        question_template = f'[MATH_TASK] Problem: {query} Solution:'
+        question_template = f'[MATH_TASK] Problem:\n{query}\n\nSolution:'
         return question_template
     
     def prepare_dataset(dataset, tokenizer):
@@ -157,17 +157,18 @@ if __name__ == "__main__":
         raw_question = train_dataset["raw_question"]
         raw_question_template = train_dataset["raw_question_template"]
    
-    use_llm = True
     response_length = 1024
     temperature = 0.35
     top_p = 0.9 #1
     use_original_format = False
-    print("===use_llm:", use_llm)
+    top_k = 50
     print("===response_length:", response_length)
     print("===temperature:", temperature)
     print("===temperature:", top_p)
-    print("===use_original_format:", use_original_format)   
-    sampling_params = SamplingParams(temperature=temperature, top_p=top_p, max_tokens=response_length, stop="\n\n\nProblem:")
+    print("===use_original_format:", use_original_format)
+    print("===top_k:", top_k)  
+    sampling_params = SamplingParams(temperature=temperature, top_p=top_p, top_k=top_k,  
+                                    max_tokens=response_length, stop="\n\n\nProblem:")
 
     # Initialize a list to store the scores
     scores = []
