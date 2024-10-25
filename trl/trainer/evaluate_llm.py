@@ -34,22 +34,22 @@ source llm_gfn_git/bin/activate
 echo "running script.."
 cd $HOME/scratch/gfn_llm/
 
-python3 trl/trainer/evaluate.py \
+python3 trl/trainer/evaluate_llm.py \
     --output_dir models/GSM8K/ppo \
     --sft_model_path realtreetune/rho-1b-sft-GSM8K \
     --sanity_check
 
-python3 trl/trainer/evaluate.py \
+python3 trl/trainer/evaluate_llm.py \
     --output_dir models/GSM8K/ppo \
     --sft_model_path realtreetune/deepseekmath-7b-sft-GSM8K \
     --sanity_check
 
-python3 trl/trainer/evaluate.py \
+python3 trl/trainer/evaluate_llm.py \
     --output_dir models/GSM8K/ppo \
     --sft_model_path realtreetune/rho-1b-sft-MATH \
     --sanity_check
 
-python3 trl/trainer/evaluate.py \
+python3 trl/trainer/evaluate_llm.py \
     --output_dir models/GSM8K/ppo \
     --sft_model_path realtreetune/deepseekmath-7b-sft-MATH-v2 \
     --sanity_check
@@ -82,7 +82,8 @@ if __name__ == "__main__":
         return float(value)
     
     def data_processing(query):
-        question_template = f'{bos_token} [MATH_TASK] Problem: {query} Solution:'
+        #question_template = f'{bos_token} [MATH_TASK] Problem: {query} Solution:'
+        question_template = f'[MATH_TASK] Problem: {query} Solution:'
         return question_template
     
     def prepare_dataset(dataset, tokenizer):
@@ -117,7 +118,7 @@ if __name__ == "__main__":
         if given_answer is None:
             return torch.tensor(False)
         assert ground_truth is not None
-        comparison = torch.isclose(torch.tensor(given_answer), torch.tensor(ground_truth), atol=1e-5)
+        comparison = torch.isclose(torch.tensor(given_answer), torch.tensor(ground_truth), atol=1e-5).all()
         return  comparison
     
     def extract_predicted_answer_from_text(text: str, use_original_format:bool=False):
@@ -171,36 +172,32 @@ if __name__ == "__main__":
     # Initialize a list to store the scores
     scores = []
     for i in tqdm(range(0, len(queries))):
-        query = queries[i] #->74, this value vary.
-        #print("===1. query: ", query)
-        query = torch.tensor(query).unsqueeze(0)
-        #print("===2. query: ", query)
-        context_length = query.shape[1]
-        #print("===3. context_length: ", context_length)
-        ground_truth = ground_truth_data[i]
-        #print("===4. ground_truth: ", ground_truth)
         raw_questions = raw_question[i]
-        #print("===5. raw_questions: ", raw_questions)
-        #raw_question_decode = tokenizer.decode(query[0], skip_special_tokens=True)
+        print("===1. raw_questions: ", raw_questions)
+        query = queries[i] #->74, this value vary.
+        #print("===2. query: ", query)
+        query = torch.tensor(query).unsqueeze(0)
+        #print("===3. query: ", query)
         raw_question_decode = tokenizer.decode(query[0], skip_special_tokens=False)
-        #print("===6. raw_question_decode: ", raw_question_decode)
-        query = raw_question_template[i]
-        outputs = llm.generate(query, sampling_params)
-        #pred_answer = outputs[0].outputs[0].text
+        print("===4. raw_question_decode: ", raw_question_decode)
+        query_template = raw_question_template[i]
+        print("===5. query_template: ", query_template)
+        outputs = llm.generate(query_template, sampling_params)
+        #print("===6. outputs: ", outputs[0].outputs[0].token_ids)
         decoded_text = tokenizer.decode(outputs[0].outputs[0].token_ids, skip_special_tokens=False)
-        #print("===9B. pred_answer: ", pred_answer)
-        #print("===9C. decoded_text: ", decoded_text)
+        print("===7. decoded_text: ", decoded_text)
         pred_answer = extract_predicted_answer_from_text(text=decoded_text, 
                                                             use_original_format=use_original_format,
                                                             )
+        g_truth_text = ground_truth_text[i]
+        print("===8. ground_truth_text: ", g_truth_text)
+        ground_truth = ground_truth_data[i]
+        print("===9. ground_truth: ", ground_truth)
         print("===10. pred_answer: ", pred_answer)    
-        #print("===11. ground_truth_text: ", ground_truth_text[i])
-        print("===12. ground_truth: ", ground_truth)
         score = grade_answer(pred_answer, ground_truth) # binary_RM
-        #print("===13. score: ", score) 
-        print("===14. score.item(): ", score.item())
-        scores.append(score.item())
-        #print("===15. score: ", scores) 
+        print("===11. score: ", score) 
+        scores.append(score)
+        #print("===12. scores: ", scores) 
         # Calculate the average score
         average_score = sum(scores) / len(scores)
         print(f"Average Score: {average_score}")
