@@ -21,7 +21,7 @@ FIND_NUMBERS_REGEX = re.compile(
 
 """
 salloc --gres=gpu:a100l:1 --cpus-per-gpu=4 --mem=32G -t 10:00:00 --partition=unkillable
-salloc --gres=gpu:a100l:2 -c 24 --mem=32G -t 12:00:00 --partition=lab-bengioy
+salloc --gres=gpu:a100l:1 -c 24 --mem=32G -t 12:00:00 --partition=lab-bengioy
 
 module unload anaconda
 echo "loading modules"
@@ -174,34 +174,34 @@ if __name__ == "__main__":
     scores = []
     for i in tqdm(range(0, len(queries))):
         raw_questions = raw_question[i]
-        print("===1. raw_questions: ", raw_questions)
+        #print("===1. raw_questions: ", raw_questions)
         query = queries[i] #->74, this value vary.
         #print("===2. query: ", query)
         query = torch.tensor(query).unsqueeze(0)
         #print("===3. query: ", query)
         raw_question_decode = tokenizer.decode(query[0], skip_special_tokens=False)
-        print("===4. raw_question_decode: ", raw_question_decode)
+        #print("===4. raw_question_decode: ", raw_question_decode)
         query_template = raw_question_template[i]
-        print("===5. query_template: ", query_template)
+        #print("===5. query_template: ", query_template)
         outputs = llm.generate(query_template, sampling_params)
         #print("===6. outputs: ", outputs[0].outputs[0].token_ids)
         decoded_text = tokenizer.decode(outputs[0].outputs[0].token_ids, skip_special_tokens=False)
-        print("===7. decoded_text: ", decoded_text)
+        #print("===7. decoded_text: ", decoded_text)
         pred_answer = extract_predicted_answer_from_text(text=decoded_text, 
                                                             use_original_format=use_original_format,
                                                             )
         g_truth_text = ground_truth_text[i]
-        print("===8. ground_truth_text: ", g_truth_text)
+        #print("===8. ground_truth_text: ", g_truth_text)
         ground_truth = ground_truth_data[i]
-        print("===9. ground_truth: ", ground_truth)
-        print("===10. pred_answer: ", pred_answer)    
+        #print("===9. ground_truth: ", ground_truth)
+        #print("===10. pred_answer: ", pred_answer)    
         score = grade_answer(pred_answer, ground_truth) # binary_RM
-        print("===11. score: ", score) 
+        #print("===11. score: ", score) 
         scores.append(score)
         #print("===12. scores: ", scores) 
         # Calculate the average score
         average_score = sum(scores) / len(scores)
-        print(f"Average Score: {average_score}")
+        #print(f"Average Score: {average_score}")
         #import pdb; pdb.set_trace()
         print('================================================================')
 print(f" Final Average Score: {average_score}")
