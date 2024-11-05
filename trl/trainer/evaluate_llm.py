@@ -3,6 +3,7 @@ import shutil
 from tqdm import tqdm
 from datasets import load_dataset
 from transformers import (
+    AutoModelForCausalLM,
     AutoTokenizer,
     HfArgumentParser,
 )
@@ -12,7 +13,12 @@ from trl.trainer import ModelConfig #(Ask to SIDDARTH)
 from trl.trainer.rloo_trainer_reasoning import RLOOConfig, RLOOTrainerReasoning
 from vllm import LLM, SamplingParams
 import torch
-
+from transformers import (
+    GenerationConfig,
+)
+from trl.trainer.utils import (
+    generate,
+)
 INVALID_LOGPROB = 1.0
 FIND_NUMBERS_REGEX = re.compile(
     r"(?:[+-]?\d+\.\d*|[+-]?\.\d+|[+-]?\d+e[-+]?\d+|[+-]?\d+)"
@@ -33,6 +39,9 @@ source llm_gfn_git/bin/activate
 
 echo "running script.."
 cd $HOME/scratch/gfn_llm/
+
+Note: sanity_check is not doing anyting in the evaluate_llm.py script. 
+[TODO] Remove it.
 
 python3 trl/trainer/evaluate_llm.py \
     --output_dir models/GSM8K/ppo \
@@ -64,6 +73,20 @@ if __name__ == "__main__":
         config.sft_model_path,
         #trust_remote_code=model_config.trust_remote_code,
     )
+    # Add missing special tokens if necessary
+    if tokenizer.pad_token_id is None:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
+    if tokenizer.eos_token_id is None:
+        tokenizer.add_special_tokens({"eos_token": "<eos>"})
+    
+    policy = AutoModelForCausalLM.from_pretrained(
+        config.sft_model_path, trust_remote_code=model_config.trust_remote_code
+    )
+    # Align padding tokens between tokenizer and model
+    policy.config.pad_token_id = tokenizer.pad_token_id
+    policy.config.eos_token_id = tokenizer.eos_token_id
+
     #tokenizer.pad_token = tokenizer.eos_token
     # BOS and EOS tokens (check if your model defines them explicitly).
     bos_token = tokenizer.bos_token or "<bos>"
@@ -159,14 +182,25 @@ if __name__ == "__main__":
    
     response_length = 1024
     temperature = 0.35
-    top_p = 0.9 #1
+    top_p = 0.9
     use_original_format = False
     top_k = 50
+    hf_implementation = False
+
     print("===response_length:", response_length)
     print("===temperature:", temperature)
-    print("===temperature:", top_p)
+    print("===top_p:", top_p)
     print("===use_original_format:", use_original_format)
-    print("===top_k:", top_k)  
+    print("===top_k:", top_k)
+    print("===hf_implementation:", hf_implementation)
+
+    generation_config = GenerationConfig(
+            max_new_tokens=response_length,
+            temperature=(temperature + 1e-7),
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=True,
+        )    
     sampling_params = SamplingParams(temperature=temperature, top_p=top_p, top_k=top_k,  
                                     max_tokens=response_length, stop="\n\n\nProblem:")
 
@@ -187,9 +221,22 @@ if __name__ == "__main__":
         #print("===6. outputs: ", outputs[0].outputs[0].token_ids)
         decoded_text = tokenizer.decode(outputs[0].outputs[0].token_ids, skip_special_tokens=False)
         #print("===7. decoded_text: ", decoded_text)
-        pred_answer = extract_predicted_answer_from_text(text=decoded_text, 
-                                                            use_original_format=use_original_format,
+        pred_answer = extract_predicted_answer_from_text(text=decoded_text, use_original_format=use_original_format)
+        if hf_implementation:
+            query_response, logits = generate(
+                policy,
+                query,
+                tokenizer.pad_token_id,
+                generation_config,
+            )
+            context_length = query.shape[1]
+            pred_answer_hf = query_response[:, context_length:]
+            pred_answer_hf = tokenizer.decode(pred_answer_hf[0])
+            pred_number_hf = extract_predicted_answer_from_text(text=pred_answer_hf, 
+                                                        use_original_format=use_original_format,
                                                             )
+            #print('===pred_number_hf:', pred_number_hf)
+        
         g_truth_text = ground_truth_text[i]
         #print("===8. ground_truth_text: ", g_truth_text)
         ground_truth = ground_truth_data[i]
