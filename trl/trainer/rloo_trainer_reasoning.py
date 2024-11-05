@@ -44,7 +44,7 @@ INVALID_LOGPROB = 1.0
 FIND_NUMBERS_REGEX = re.compile(
     r"(?:[+-]?\d+\.\d*|[+-]?\.\d+|[+-]?\d+e[-+]?\d+|[+-]?\d+)"
 )
-
+from tqdm import tqdm
 
 class RLOOTrainerReasoning(Trainer):
     def __init__(
@@ -53,28 +53,20 @@ class RLOOTrainerReasoning(Trainer):
         tokenizer: PreTrainedTokenizer,
         policy: nn.Module,
         ref_policy: nn.Module,
-        #reward_model: nn.Module, #(Remove)
         train_dataset: Dataset,
         data_collator: Optional[DataCollatorWithPadding] = None,
         eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
         # less commonly used
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
-        # compute_metrics: Optional[Callable[[EvalPrediction], Dict]] = None,
-        # model_init: Optional[Callable[[torch.nn.Module], None]] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
     ) -> None:
         self.args = config
         args = config
         self.tokenizer = tokenizer
         self.policy = policy
-
-        self.policy.generation_config.eos_token_id = (
-            None  # disable `pad_token_id` and `eos_token_id` because we just want to
-        )
-        self.policy.generation_config.pad_token_id = None  # generate tokens without truncation / padding
-
+        self.policy.generation_config.eos_token_id = tokenizer.pad_token_id
+        self.policy.generation_config.pad_token_id = tokenizer.eos_token_id
         self.ref_policy = ref_policy
-        #self.reward_model = reward_model #(removed)
         self.train_dataset = train_dataset
         self.train_dataset_len = len(train_dataset)
         self.data_collator = data_collator
@@ -121,7 +113,6 @@ class RLOOTrainerReasoning(Trainer):
         #########
         # setup model, optimizer, and others
         #########
-        #for module in [policy, ref_policy, reward_model]:
         for module in [policy, ref_policy]:
             disable_dropout_in_model(module)
         if args.stop_token and args.stop_token == "eos":
@@ -179,16 +170,12 @@ class RLOOTrainerReasoning(Trainer):
         self.eval_dataloader = accelerator.prepare(self.eval_dataloader)
 
         if self.is_deepspeed_enabled:
-            # self.reward_model = prepare_deepspeed(
-            #     self.reward_model, args.per_device_train_batch_size, args.bf16, args.fp16
-            # )
             self.ref_policy = prepare_deepspeed(
                 self.ref_policy, args.per_device_train_batch_size, args.bf16, args.fp16
             )
             self.deepspeed = self.model
         else:
             self.ref_policy = self.ref_policy.to(self.accelerator.device)
-            # self.reward_model = self.reward_model.to(self.accelerator.device)
 
     def get_train_dataloader(self) -> DataLoader:
         return self.dataloader
@@ -197,20 +184,19 @@ class RLOOTrainerReasoning(Trainer):
         return self.eval_dataloader
     
     def grade_answer(self, given_answer, ground_truth):
-        if given_answer is None:
-            return False
-        # Compare the tensors and convert the result to integers (1 for True, 0 for False)
-        comparison = (given_answer.flatten() == ground_truth.flatten()) #.int()
-        return comparison.view(-1, 1)  # Reshape to (64, 1)
+        comparisons = (given_answer == ground_truth).float() 
+        return  comparisons
     
-    def extract_predicted_answer_from_text(self, text: str, use_original_format:bool=False) -> Optional[str]:
+    def extract_predicted_answer_from_text(self, text: str, use_original_format:bool=False):
         if use_original_format:
             # Extract the final answer based on ####
             if "####" not in text:
                 return None
             parts = text.split("####")
             assert len(parts) >= 2
-            return parts[-1].strip()
+            digit = parts[-1].strip()
+            digit = digit.replace(",", "")
+            return float(digit)
 
         text = text.replace(",", "")
         pred_answer = FIND_NUMBERS_REGEX.findall(text)  # TODO: add task to attributes
@@ -219,7 +205,7 @@ class RLOOTrainerReasoning(Trainer):
         else:
             # Pick the last number
             pred_answer = pred_answer[-1].strip()
-            return pred_answer
+            return float(pred_answer)
         
     def extract_predicted_answers(self, texts: List[str], use_original_format: bool = False) -> List[Optional[str]]:
         """
@@ -230,6 +216,22 @@ class RLOOTrainerReasoning(Trainer):
             answer = self.extract_predicted_answer_from_text(text, use_original_format)
             answers.append(answer)
         return answers
+    
+    def remove_after_tag(self, text, tag="</s>"):
+        index = text.find(tag)
+        assert index != -1, f"Tag '{tag}' not found in the input text."
+        return text[:index].strip()
+
+    def process_each_ouput(self, pred_answer_all):
+        # Process each answer in the list
+        results = []
+        for answer in pred_answer_all:
+            try:
+                result = self.remove_after_tag(answer)
+                results.append(result)
+            except AssertionError as e:
+                print(e)  # Print the assertion error if the tag is not found
+        return results
 
     def train(self):
         args = self.args
@@ -237,7 +239,6 @@ class RLOOTrainerReasoning(Trainer):
         optimizer = self.optimizer
         model = self.model
         ref_policy = self.ref_policy
-        #reward_model = self.reward_model (removed)
         tokenizer = self.tokenizer
         dataloader = self.dataloader
         device = accelerator.device
@@ -249,11 +250,11 @@ class RLOOTrainerReasoning(Trainer):
         iter_dataloader = iter(repeat_generator())
         generation_config = GenerationConfig(
             max_new_tokens=args.response_length,
-            min_new_tokens=args.response_length,
-            temperature=(args.temperature + 1e-7),
-            top_k=0.0,
-            top_p=1.0,
+            temperature=(0.35 + 1e-7),
+            top_k=50,
+            top_p=0.9,
             do_sample=True,
+
         )
 
         accelerator.print("===training policy===")
@@ -269,7 +270,7 @@ class RLOOTrainerReasoning(Trainer):
         ratio_stats = torch.zeros(stats_shape, device=device)
         model.train()
         n_updates = 0
-        for update in range(1, args.num_updates + 1):
+        for update in tqdm(range(1, args.num_updates + 1)):
             if (n_updates+1) % (args.num_updates//10) == 0:
                 self.save_model(args.output_dir)
                 n_updates = 0
@@ -292,28 +293,20 @@ class RLOOTrainerReasoning(Trainer):
                 logprobs = []
                 ref_logprobs = []
                 scores = []
+                accuracies = []
                 sequence_lengths = []
                 with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
                     for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size):
                         query = queries[i : i + args.local_rollout_forward_batch_size] # 64,128
                         ground_truth = response_d[i : i + args.local_rollout_forward_batch_size] # 64,1
+
                         query_response, logits = generate(
-                            unwrapped_model,
+                            self.policy,
                             query,
                             tokenizer.pad_token_id,
                             generation_config,
-                        ) # query_response -> [64,241]
-                        pred_answer = query_response[:, context_length:]
-                        pred_answer = tokenizer.batch_decode(pred_answer, skip_special_tokens=True)
-                        pred_answer = self.extract_predicted_answers(pred_answer, 
-                                                                     use_original_format=False)
-                        pred_answer_tensor = torch.tensor([float(x) for x in pred_answer])
-                        # Reshape the tensor to (64, 1)
-                        response = pred_answer_tensor.view(len(pred_answer), 1).to(device)
-                        #ground_truth = tokenizer.batch_decode(response, skip_special_tokens=True)
-                        score = self.grade_answer(pred_answer_tensor, ground_truth) # binary_RM
-
-                        # use the logits during generation directly, instead of using the following
+                        ) 
+                        response = query_response[:, context_length:]
                         all_logprob = F.log_softmax(logits, dim=-1)
                         logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
                         del logits, all_logprob
@@ -335,11 +328,20 @@ class RLOOTrainerReasoning(Trainer):
                             )
 
                         # Response Processing 2. run reward model on the truncated responses
-                        postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
+
                         sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
-                        # _, score, _ = get_reward(
-                        #     reward_model, postprocessed_query_response, tokenizer.pad_token_id, context_length
-                        # )
+                        pred_answer_all = tokenizer.batch_decode(response)
+                        pred_answer_filtered = self.process_each_ouput(pred_answer_all)
+                        pred_answer = self.extract_predicted_answers(pred_answer_filtered, 
+                                                                     use_original_format=False)
+                        response_value =  torch.tensor(pred_answer).view(len(pred_answer), 1).to(device)
+                        score = (self.grade_answer(response_value, ground_truth)).squeeze(1) # binary_RM
+                        correct_predictions = score.sum()
+                        # Calculate accuracy using the sum of correct predictions divided by the total number of predictions
+                        total_predictions = len(score)  # or ground_truth.size(0) for number of rows
+                        accuracy = correct_predictions / total_predictions
+                        print("===Accuracy:", accuracy)
+                        sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
                         query_responses.append(query_response)
                         responses.append(response)
                         postprocessed_responses.append(postprocessed_response)
@@ -347,6 +349,7 @@ class RLOOTrainerReasoning(Trainer):
                         ref_logprobs.append(ref_logprob)
                         sequence_lengths.append(sequence_length)
                         scores.append(score)
+                        accuracies.append(accuracy)
                 query_responses = torch.cat(query_responses, 0)
                 responses = torch.cat(responses, 0)
                 postprocessed_responses = torch.cat(postprocessed_responses, 0)
@@ -458,6 +461,7 @@ class RLOOTrainerReasoning(Trainer):
                 metrics["objective/non_score_reward"] = self.accelerator.gather(mean_non_score_reward).mean().item()
                 metrics["objective/rlhf_reward"] = self.accelerator.gather(rlhf_reward).mean().item()
                 metrics["objective/scores"] = self.accelerator.gather(scores.mean()).mean().item()
+                metrics["objective/accuracies"] = self.accelerator.gather(accuracies[0]).item()
                 metrics["policy/approxkl_avg"] = self.accelerator.gather(approxkl_stats).mean().item()
                 metrics["policy/clipfrac_avg"] = self.accelerator.gather(pg_clipfrac_stats).mean().item()
                 metrics["loss/policy_avg"] = self.accelerator.gather(pg_loss_stats).mean().item()
@@ -482,16 +486,17 @@ class RLOOTrainerReasoning(Trainer):
         args = self.args
         tokenizer = self.tokenizer
         generation_config = GenerationConfig(
-            max_new_tokens=self.args.response_length,
+            max_new_tokens=args.response_length,
             temperature=(0.01 + 1e-7),
-            top_k=0.0,
-            top_p=1.0,
+            top_k=50,
+            top_p=0.9,
             do_sample=True,
         )
 
         table = defaultdict(list)
         for batch in self.eval_dataloader:
             query = batch["input_ids"]
+            ground_truth = batch["response_ids"].unsqueeze(1)
             with torch.no_grad():
                 context_length = query.shape[1]
                 with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
@@ -502,16 +507,13 @@ class RLOOTrainerReasoning(Trainer):
                         generation_config,
                     )
                 response = query_response[:, context_length:]
-                postprocessed_response = response
-                if args.stop_token_id is not None:  # handle the edge case when stop_token_id exists but is 0
-                    postprocessed_response = truncate_response(args.stop_token_id, tokenizer.pad_token_id, response)
+                pred_answer_all = tokenizer.batch_decode(response)
+                pred_answer_filtered = self.process_each_ouput(pred_answer_all)
+                pred_answer = self.extract_predicted_answers(pred_answer_filtered, use_original_format=False)
+                response_value =  torch.tensor(pred_answer).view(len(pred_answer), 1).to(self.accelerator.device)
+                score = (self.grade_answer(response_value, ground_truth)).squeeze(1) # binary_RM
                 table["query"].extend(gather_object(tokenizer.batch_decode(query, skip_special_tokens=True)))
-                table["model response"].extend(gather_object(tokenizer.batch_decode(postprocessed_response)))
-
-                postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
-                _, score, _ = get_reward(
-                    self.reward_model, postprocessed_query_response, tokenizer.pad_token_id, context_length
-                )
+                table["model response"].extend(gather_object((response_value)).float().cpu().numpy())
                 table["score"].extend(self.accelerator.gather(score).float().cpu().numpy())
 
             if sampling:

@@ -15,6 +15,7 @@ from trl.trainer.rloo_trainer_reasoning import RLOOConfig, RLOOTrainerReasoning
 
 from trl.trainer.utils import SIMPLE_QUERY_CHAT_TEMPLATE
 import re
+import torch
 
 """
 module unload anaconda
@@ -34,46 +35,32 @@ python3 examples/scripts/rloo/rloo_GSM8K.py \
     --per_device_train_batch_size 1 \
     --gradient_accumulation_steps 64 \
     --total_episodes 30000 \
-    --model_name_or_path EleutherAI/pythia-1b-deduped  \
-    --sft_model_path EleutherAI/pythia-1b-deduped \
-    --non_eos_penalty \
-    --stop_token eos \
-    --response_length 53 \
-    --sanity_check
-
-python3 examples/scripts/rloo/rloo_GSM8K.py \
-    --learning_rate 3e-6 \
-    --output_dir models/GSM8K/ppo \
-    --per_device_train_batch_size 1 \
-    --gradient_accumulation_steps 64 \
-    --total_episodes 30000 \
     --model_name_or_path microsoft/rho-math-1b-v0.1 \
     --sft_model_path realtreetune/rho-1b-sft-GSM8K \
     --non_eos_penalty \
     --stop_token eos \
-    --response_length 53 \
+    --response_length 1024 \
     --sanity_check
-
+    
 accelerate launch --config_file examples/accelerate_configs/deepspeed_zero2.yaml \
-    examples/scripts/rloo/rloo_tldr.py \
-    --output_dir models/minimal/rloo_tldr \
+    examples/scripts/rloo/rloo_GSM8K.py \
+    --output_dir models/GSM8K/ppo \
     --num_ppo_epochs 1 \
     --num_mini_batches 1 \
     --learning_rate 3e-6 \
     --per_device_train_batch_size 16 \
     --gradient_accumulation_steps 4 \
     --total_episodes 1000000 \
-    --model_name_or_path EleutherAI/pythia-1b-deduped \
-    --sft_model_path cleanrl/EleutherAI_pythia-1b-deduped__sft__tldr \
-    --reward_model_path cleanrl/EleutherAI_pythia-1b-deduped__reward__tldr \
+    --model_name_or_path microsoft/rho-math-1b-v0.1 \
+    --sft_model_path realtreetune/rho-1b-sft-GSM8K \
+    --response_length 1024 \
     --local_rollout_forward_batch_size 16 \
-    --non_eos_penalty \
-    --stop_token eos \
+    --stop_token eos
 """
 
 
 if __name__ == "__main__":
-    #wandb.init(project='trl', entity='swish')
+    wandb.init(project='trl', entity='johan0730')
     parser = HfArgumentParser((RLOOConfig, ModelConfig))
     config, model_config = parser.parse_args_into_dataclasses()
     # remove output_dir if exists
@@ -83,61 +70,62 @@ if __name__ == "__main__":
     # Model & Tokenizer
     ################
     tokenizer = AutoTokenizer.from_pretrained(
-        model_config.model_name_or_path,
-        padding_side="left",
-        trust_remote_code=model_config.trust_remote_code,
+        config.sft_model_path,
     )
-    tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-    if tokenizer.chat_template is None:
-        tokenizer.chat_template = SIMPLE_QUERY_CHAT_TEMPLATE
-    # reward_model = AutoModelForSequenceClassification.from_pretrained(
-    #     config.reward_model_path, trust_remote_code=model_config.trust_remote_code, num_labels=1
-    # )
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
+    if tokenizer.eos_token_id is None:
+        tokenizer.add_special_tokens({"eos_token": "<eos>"})
+    
     ref_policy = AutoModelForCausalLM.from_pretrained(
         config.sft_model_path, trust_remote_code=model_config.trust_remote_code
     )
     policy = AutoModelForCausalLM.from_pretrained(
         config.sft_model_path, trust_remote_code=model_config.trust_remote_code
     )
+
+    # Align padding tokens between tokenizer and model
+    policy.config.pad_token_id = tokenizer.pad_token_id
+    policy.config.eos_token_id = tokenizer.eos_token_id
+    
+    # Align padding tokens between tokenizer and model
+    ref_policy.config.pad_token_id = tokenizer.pad_token_id
+    ref_policy.config.eos_token_id = tokenizer.eos_token_id
+    
     ################
     # Dataset
     ################
     cache_dir = os.path.expanduser("~/.cache/huggingface/datasets")
     raw_datasets = load_dataset("openai/gsm8k", 'main', cache_dir=cache_dir)
-    #raw_datasets = load_dataset("trl-internal-testing/tldr-preference-sft-trl-style", cache_dir=cache_dir)
-
-    if config.sanity_check:
-        for key in raw_datasets:
-            raw_datasets[key] = raw_datasets[key].select(range(1000))
     train_dataset = raw_datasets["train"]
     eval_dataset = raw_datasets["test"]
     
     def parse_number(value):
         value = value.strip()
-        # Remove commas
         value = value.replace(',', '')
         return float(value)
-
+    
+    def data_processing(query):
+        #question_template = f'{bos_token} [MATH_TASK] Problem: {query} Solution:'
+        question_template = f'[MATH_TASK] Problem:\n{query}\n\nSolution:'
+        return question_template
+    
     def prepare_dataset(dataset, tokenizer):
         """pre-tokenize the dataset before training; only collate during training"""
 
         def tokenize(element):
-            example = {
-                'content': element["question"],
-                'role': 'user'
-            }
-            input_ids = tokenizer.apply_chat_template(
-                #element["messages"][:1],
-                [example],
+            data_pross = data_processing(element["question"])
+            input_ids = tokenizer(
+                data_pross,
                 padding=False,
-                add_generation_prompt=True,
             )
             number = parse_number(element["answer"].split('####')[1])
-            print(element["answer"].split('####')[1], '====', number)
-
-            return {"input_ids": input_ids, 
-                    "lengths": len(input_ids), 
-                    "response_ids":number}
+            return {"input_ids": input_ids['input_ids'], 
+                    "lengths": len(input_ids['input_ids']), 
+                    "response_ids":number,
+                    }
 
         return dataset.map(
             tokenize,
@@ -149,13 +137,6 @@ if __name__ == "__main__":
     train_dataset = prepare_dataset(train_dataset, tokenizer)
     eval_dataset = prepare_dataset(eval_dataset, tokenizer)
 
-    # filtering -> not sure how to define this tokens.
-    # train_dataset = train_dataset.filter(lambda x: x["lengths"] <= 512)
-    # eval_dataset = eval_dataset.filter(lambda x: x["lengths"] <= 512)
-    # train_dataset = train_dataset.filter(lambda x: x["response_lengths"] <= config.response_length)
-    # eval_dataset = eval_dataset.filter(lambda x: x["response_lengths"] <= config.response_length)
-    # assert train_dataset[0]["input_ids"][-1] != tokenizer.eos_token_id, "The last token should not be an EOS token"
-
     ################
     # Training
     ################
@@ -164,6 +145,7 @@ if __name__ == "__main__":
         config=config,
         tokenizer=tokenizer,
         policy=policy,
+        ajohan=policy,
         ref_policy=ref_policy,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
