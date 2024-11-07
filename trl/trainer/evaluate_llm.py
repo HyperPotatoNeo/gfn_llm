@@ -71,7 +71,6 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(
         config.sft_model_path,
-        #trust_remote_code=model_config.trust_remote_code,
     )
     # Add missing special tokens if necessary
     if tokenizer.pad_token_id is None:
@@ -163,6 +162,16 @@ if __name__ == "__main__":
             # Pick the last number
             pred_answer = pred_answer[-1].strip()
             return float(pred_answer)
+        
+    def evaluate_logits(lm_backbone: torch.nn.Module, 
+                        sequences: torch.Tensor, 
+                        pad_token_id: int
+                        ) -> torch.Tensor:
+        attention_mask = sequences != pad_token_id  # Create attention mask
+        with torch.no_grad():
+            output = lm_backbone(input_ids=sequences.unsqueeze(0), attention_mask=attention_mask, output_hidden_states=False)
+        logits = output.logits  # Logits for each token in the sequences
+        return logits
 
     type = 'eval'
     if type == 'eval':
@@ -236,7 +245,9 @@ if __name__ == "__main__":
                                                         use_original_format=use_original_format,
                                                             )
             #print('===pred_number_hf:', pred_number_hf)
-        
+            token_ids_tensor = torch.tensor(outputs[0].outputs[0].token_ids, dtype=torch.long)
+            logits_llm = evaluate_logits(lm_backbone=policy, sequences=token_ids_tensor, pad_token_id=tokenizer.pad_token_id)
+            import pdb; pdb.set_trace()
         g_truth_text = ground_truth_text[i]
         #print("===8. ground_truth_text: ", g_truth_text)
         ground_truth = ground_truth_data[i]
@@ -248,7 +259,7 @@ if __name__ == "__main__":
         #print("===12. scores: ", scores) 
         # Calculate the average score
         average_score = sum(scores) / len(scores)
-        #print(f"Average Score: {average_score}")
+        print(f"Average Score: {average_score}")
         #import pdb; pdb.set_trace()
         print('================================================================')
 print(f" Final Average Score: {average_score}")
