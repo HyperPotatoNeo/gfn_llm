@@ -39,6 +39,8 @@ from .utils import (
 )
 from .rloo_config import RLOOConfig
 import re
+from vllm import LLM, SamplingParams
+
 
 INVALID_LOGPROB = 1.0
 FIND_NUMBERS_REGEX = re.compile(
@@ -52,6 +54,7 @@ class RLOOTrainerReasoning(Trainer):
         config: RLOOConfig,
         tokenizer: PreTrainedTokenizer,
         policy: nn.Module,
+        #vllm_policy: nn.Module,
         ref_policy: nn.Module,
         train_dataset: Dataset,
         data_collator: Optional[DataCollatorWithPadding] = None,
@@ -64,6 +67,7 @@ class RLOOTrainerReasoning(Trainer):
         args = config
         self.tokenizer = tokenizer
         self.policy = policy
+        #self.vllm_policy = vllm_policy
         self.policy.generation_config.eos_token_id = tokenizer.pad_token_id
         self.policy.generation_config.pad_token_id = tokenizer.eos_token_id
         self.ref_policy = ref_policy
@@ -263,6 +267,15 @@ class RLOOTrainerReasoning(Trainer):
 
         )
 
+        response_length = 1024
+        temperature = 0.35
+        top_p = 0.9
+        top_k = 50
+        sampling_params = SamplingParams(temperature=temperature, 
+                                         top_p=top_p, 
+                                         top_k=top_k,
+                                         max_tokens=response_length, stop="\n\n\nProblem:")
+
         accelerator.print("===training policy===")
         global_step = 0
         start_time = time.time()
@@ -313,6 +326,14 @@ class RLOOTrainerReasoning(Trainer):
                             generation_config,
                         ) 
                         response = query_response[:, context_length:]
+                        # compare response and logits.
+                        response2 = self.vllm_policy.generate(query, sampling_params)
+                        token_ids_tensor2 = torch.tensor(response2[0].outputs[0].token_ids, dtype=torch.long)
+                        logits2 = self.evaluate_logits(lm_backbone=self.policy, sequences=token_ids_tensor2,
+                                                       pad_token_id=tokenizer.pad_token_id)
+
+
+
                         all_logprob = F.log_softmax(logits, dim=-1)
                         logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
                         del logits, all_logprob
@@ -341,6 +362,11 @@ class RLOOTrainerReasoning(Trainer):
                         pred_answer = self.extract_predicted_answers(pred_answer_filtered, 
                                                                      use_original_format=False)
                         response_value =  torch.tensor(pred_answer).view(len(pred_answer), 1).to(device)
+                        # compare responses.
+                        pred_answer2 = self.extract_predicted_answers(pred_answer_filtered2, use_original_format=False)
+                        response_value2 =  torch.tensor(pred_answer2).view(len(pred_answer2), 1).to(device)
+                        
+                        score = (self.grade_answer(response_value, ground_truth)).squeeze(1) # binary_RM
                         score = (self.grade_answer(response_value, ground_truth)).squeeze(1) # binary_RM
                         correct_predictions = score.sum()
                         # Calculate accuracy using the sum of correct predictions divided by the total number of predictions
