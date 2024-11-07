@@ -145,7 +145,6 @@ if __name__ == "__main__":
         config=config,
         tokenizer=tokenizer,
         policy=policy,
-        ajohan=policy,
         ref_policy=ref_policy,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
