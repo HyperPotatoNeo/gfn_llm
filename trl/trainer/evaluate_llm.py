@@ -27,7 +27,7 @@ FIND_NUMBERS_REGEX = re.compile(
 
 """
 salloc --gres=gpu:a100l:1 --cpus-per-gpu=4 --mem=32G -t 10:00:00 --partition=unkillable
-salloc --gres=gpu:a100l:1 -c 24 --mem=32G -t 12:00:00 --partition=lab-bengioy
+salloc --gres=gpu:a100l:1 -c 24 --mem=80G -t 12:00:00 --partition=lab-bengioy
 
 module unload anaconda
 echo "loading modules"
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     top_p = 0.9
     use_original_format = False
     top_k = 50
-    hf_implementation = False
+    hf_implementation = True
 
     print("===response_length:", response_length)
     print("===temperature:", temperature)
@@ -206,8 +206,8 @@ if __name__ == "__main__":
     generation_config = GenerationConfig(
             max_new_tokens=response_length,
             temperature=(temperature + 1e-7),
-            top_k=top_k,
-            top_p=top_p,
+            top_k=32000, #tokenizer.vocab_size -> For not getting logits "-inf" 
+            top_p=1.,
             do_sample=True,
         )    
     sampling_params = SamplingParams(temperature=temperature, top_p=top_p, top_k=top_k,  
