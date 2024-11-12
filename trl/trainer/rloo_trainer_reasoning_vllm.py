@@ -40,7 +40,7 @@ from .utils import (
 from .rloo_config import RLOOConfig
 import re
 from vllm import LLM, SamplingParams
-
+import random
 
 INVALID_LOGPROB = 1.0
 FIND_NUMBERS_REGEX = re.compile(
@@ -54,7 +54,7 @@ class RLOOTrainerReasoning(Trainer):
         config: RLOOConfig,
         tokenizer: PreTrainedTokenizer,
         policy: nn.Module,
-        #vllm_policy: nn.Module,
+        vllm_policy: nn.Module,
         ref_policy: nn.Module,
         train_dataset: Dataset,
         data_collator: Optional[DataCollatorWithPadding] = None,
@@ -67,7 +67,6 @@ class RLOOTrainerReasoning(Trainer):
         args = config
         self.tokenizer = tokenizer
         self.policy = policy
-        #self.vllm_policy = vllm_policy
         self.policy.generation_config.eos_token_id = tokenizer.pad_token_id
         self.policy.generation_config.pad_token_id = tokenizer.eos_token_id
         self.ref_policy = ref_policy
@@ -184,8 +183,17 @@ class RLOOTrainerReasoning(Trainer):
             reserved = torch.cuda.memory_reserved()
             print(f"Memory allocated: {allocated / (1024**3):.2f} GB")
             print(f"Memory reserved: {reserved / (1024**3):.2f} GB")
-            import pdb; pdb.set_trace()
             self.ref_policy = self.ref_policy.to(self.accelerator.device)
+        if accelerator.is_main_process:
+            #self.llm = SingleGPULLM(
+            #import pdb; pdb.set_trace()
+            # revision=args.sft_model_revision,
+            # tokenizer_revision=args.sft_model_revision,
+            #self.llm = LLM(model=args.sft_model_path, tensor_parallel_size=1, device=f"cuda:{accelerator.num_processes}",)
+            self.llm = vllm_policy
+            self.llmp = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+        else:
+            print("waiting for vllm to spin up...")
 
     def get_train_dataloader(self) -> DataLoader:
         return self.dataloader
@@ -229,7 +237,10 @@ class RLOOTrainerReasoning(Trainer):
     
     def remove_after_tag(self, text, tag="</s>"):
         index = text.find(tag)
-        assert index != -1, f"Tag '{tag}' not found in the input text."
+        if index == -1:
+            # Generate a random number instead of returning '#### 0'
+            random_number = random.uniform(0, 100)  # You can change the range as needed
+            return f"#### {random_number:.2f}"  # Format the number with two decimal places
         return text[:index].strip()
 
     def process_each_ouput(self, pred_answer_all):
@@ -267,11 +278,11 @@ class RLOOTrainerReasoning(Trainer):
 
         )
 
-        response_length = 1024
+        response_length = 512#1024
         temperature = 0.35
         top_p = 0.9
         top_k = 50
-        sampling_params = SamplingParams(temperature=temperature, 
+        self.sampling_params = SamplingParams(temperature=temperature, 
                                          top_p=top_p, 
                                          top_k=top_k,
                                          max_tokens=response_length, stop="\n\n\nProblem:")
@@ -287,6 +298,9 @@ class RLOOTrainerReasoning(Trainer):
         vf_clipfrac_stats = torch.zeros(stats_shape, device=device)
         entropy_stats = torch.zeros(stats_shape, device=device)
         ratio_stats = torch.zeros(stats_shape, device=device)
+        g_responses = torch.zeros(
+            (args.batch_size, args.response_length), device=device, dtype=torch.long
+        ) #(args.batch_size * args.rloo_k, args.response_length)
         model.train()
         n_updates = 0
         for update in tqdm(range(1, args.num_updates + 1)):
@@ -306,7 +320,7 @@ class RLOOTrainerReasoning(Trainer):
                 response_d = response_d.repeat(args.rloo_k, 1)  # Now shape is (64, 1)
                 
                 query_responses = []
-                response_d_responses = []
+                #response_d_responses = []
                 responses = []
                 postprocessed_responses = []
                 logprobs = []
@@ -315,24 +329,56 @@ class RLOOTrainerReasoning(Trainer):
                 accuracies = []
                 sequence_lengths = []
                 with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
+                    g_queries_list = gather_object(queries.tolist())
+
+                    if accelerator.is_main_process:
+                        print(
+                            "🔥🔥🔥 Loading weights using shared memory;"
+                            "we expect the generations to be completely different"
+                        )
+                        start_time = time.time()
+                        self.llmp.load_weights(unwrapped_model.named_parameters())
+                        print(f"Time to load weights: {time.time() - start_time:.2f} seconds")
+                        g_queries_list = [
+                            [inneritem for inneritem in item if inneritem != tokenizer.pad_token_id]
+                            for item in g_queries_list
+                        ]
+                        outputs = self.llm.generate(
+                            prompt_token_ids=g_queries_list, sampling_params=self.sampling_params
+                        )
+                        
+                        padded_response_token_ids = []
+                        for output in outputs:
+                            token_ids = output.outputs[0].token_ids
+                            if isinstance(token_ids, tuple):
+                                token_ids = list(token_ids)
+                            DUMMY_PAD_TOKEN = 0  # we can't use tokenizer.pad_token_id because it's outside vocab and `torch.gather(all_logprob, 2, response.unsqueeze(-1))` will error out
+                            padded_token_ids = token_ids + [DUMMY_PAD_TOKEN] * (args.response_length - len(token_ids))
+                            padded_response_token_ids.append(padded_token_ids)
+                        padded_response_token_ids = torch.tensor(padded_response_token_ids, device=device)
+                        g_responses[:] = padded_response_token_ids
+
+                    broadcast(g_responses, 0)
+                    local_responses = g_responses[
+                        accelerator.local_process_index
+                        * queries.shape[0] : (accelerator.local_process_index + 1)
+                        * queries.shape[0]
+                    ]
+                    # if args.remove_duplicate_response_pad_tokens: # NOTE: micro optimization: remove the pad to longest
+                    #     local_responses = local_responses[:, :(local_responses != tokenizer.pad_token_id).sum(1).max()]
+                    queries_responses = torch.cat((queries, local_responses), 1)
                     for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size):
-                        query = queries[i : i + args.local_rollout_forward_batch_size] # 64,128
-                        ground_truth = response_d[i : i + args.local_rollout_forward_batch_size] # 64,1
-
-                        query_response, logits = generate(
-                            self.policy,
-                            query,
-                            tokenizer.pad_token_id,
-                            generation_config,
-                        ) 
+                        # query = queries[i : i + args.local_rollout_forward_batch_size] # 64,128
+                        # ground_truth = response_d[i : i + args.local_rollout_forward_batch_size] # 64,1
+                        #query = queries[i : i + args.local_rollout_forward_batch_size]
+                        query_response = queries_responses[i : i + args.local_rollout_forward_batch_size]
                         response = query_response[:, context_length:]
-                        # compare response and logits.
-                        response2 = self.vllm_policy.generate(query, sampling_params)
-                        token_ids_tensor2 = torch.tensor(response2[0].outputs[0].token_ids, dtype=torch.long)
-                        logits2 = self.evaluate_logits(lm_backbone=self.policy, sequences=token_ids_tensor2,
-                                                       pad_token_id=tokenizer.pad_token_id)
 
-
+                        output = forward(unwrapped_model, query_response, tokenizer.pad_token_id)
+                        # decoded_text = tokenizer.batch_decode(response, skip_special_tokens=False)
+                        # pred_answer = self.extract_predicted_answers(decoded_text, use_original_format=False)
+                        logits = output.logits[:, context_length - 1 : -1]
+                        logits /= args.temperature + 1e-7
 
                         all_logprob = F.log_softmax(logits, dim=-1)
                         logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
@@ -355,19 +401,17 @@ class RLOOTrainerReasoning(Trainer):
                             )
 
                         # Response Processing 2. run reward model on the truncated responses
-
                         sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
+                        # decoded_text = tokenizer.batch_decode(response, skip_special_tokens=False)
+                        # pred_answer = self.extract_predicted_answers(decoded_text, use_original_format=False)
                         pred_answer_all = tokenizer.batch_decode(response)
                         pred_answer_filtered = self.process_each_ouput(pred_answer_all)
                         pred_answer = self.extract_predicted_answers(pred_answer_filtered, 
                                                                      use_original_format=False)
+                        #response_d
                         response_value =  torch.tensor(pred_answer).view(len(pred_answer), 1).to(device)
-                        # compare responses.
-                        pred_answer2 = self.extract_predicted_answers(pred_answer_filtered2, use_original_format=False)
-                        response_value2 =  torch.tensor(pred_answer2).view(len(pred_answer2), 1).to(device)
-                        
-                        score = (self.grade_answer(response_value, ground_truth)).squeeze(1) # binary_RM
-                        score = (self.grade_answer(response_value, ground_truth)).squeeze(1) # binary_RM
+                        score = (self.grade_answer(response_value, response_d)).squeeze(1) # binary_RM
+
                         correct_predictions = score.sum()
                         # Calculate accuracy using the sum of correct predictions divided by the total number of predictions
                         total_predictions = len(score)  # or ground_truth.size(0) for number of rows
@@ -516,35 +560,72 @@ class RLOOTrainerReasoning(Trainer):
 
     def generate_completions(self, sampling: bool = False):
         args = self.args
+        accelerator = self.accelerator
         tokenizer = self.tokenizer
-        generation_config = GenerationConfig(
-            max_new_tokens=args.response_length,
-            temperature=(0.01 + 1e-7),
-            top_k=50,
-            top_p=0.9,
-            do_sample=True,
-        )
+        device = accelerator.device
 
         table = defaultdict(list)
+        g_responses = torch.zeros(
+            (args.per_device_eval_batch_size * args.world_size, args.response_length),
+            device=device,
+            dtype=torch.long,
+        )
         for batch in self.eval_dataloader:
-            query = batch["input_ids"]
+            queries = batch["input_ids"]
             ground_truth = batch["response_ids"].unsqueeze(1)
             with torch.no_grad():
-                context_length = query.shape[1]
+                context_length = queries.shape[1]
                 with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
-                    query_response, _ = generate(
-                        unwrapped_model,
-                        query,
-                        tokenizer.pad_token_id,
-                        generation_config,
+                    g_queries_list = gather_object(queries.tolist())
+
+                    if accelerator.is_main_process:
+                        print(
+                            "🔥🔥🔥 Loading weights using shared memory;"
+                            "===Evaluation"
+                        )
+                        start_time = time.time()
+                        self.llmp.load_weights(unwrapped_model.named_parameters())
+                        print(f"Time to load weights: {time.time() - start_time:.2f} seconds")
+                        g_queries_list = [
+                            [inneritem for inneritem in item if inneritem != tokenizer.pad_token_id]
+                            for item in g_queries_list
+                        ]
+                        outputs = self.llm.generate(prompt_token_ids=g_queries_list, sampling_params=self.sampling_params)
+                        padded_response_token_ids = []
+                        for output in outputs:
+                            token_ids = output.outputs[0].token_ids
+                            if isinstance(token_ids, tuple):
+                                token_ids = list(token_ids)
+                            padded_token_ids = token_ids + [tokenizer.pad_token_id] * (
+                                args.response_length - len(token_ids)
+                            )
+                            padded_response_token_ids.append(padded_token_ids)
+
+                        padded_response_token_ids = torch.tensor(padded_response_token_ids, device=device)
+
+                        g_responses[:] = padded_response_token_ids
+
+                    broadcast(g_responses, 0)
+                    queries_responses = torch.cat(
+                        (
+                            queries,
+                            g_responses[
+                                accelerator.local_process_index
+                                * queries.shape[0] : (accelerator.local_process_index + 1)
+                                * queries.shape[0]
+                            ],
+                        ),
+                        1,
                     )
-                response = query_response[:, context_length:]
+                
+                response = queries_responses[:, context_length:]               
+                #response = query_response[:, context_length:]
                 pred_answer_all = tokenizer.batch_decode(response)
                 pred_answer_filtered = self.process_each_ouput(pred_answer_all)
                 pred_answer = self.extract_predicted_answers(pred_answer_filtered, use_original_format=False)
                 response_value =  torch.tensor(pred_answer).view(len(pred_answer), 1).to(self.accelerator.device)
                 score = (self.grade_answer(response_value, ground_truth)).squeeze(1) # binary_RM
-                table["query"].extend(gather_object(tokenizer.batch_decode(query, skip_special_tokens=True)))
+                table["query"].extend(gather_object(tokenizer.batch_decode(queries, skip_special_tokens=True)))
                 table["model response"].extend(gather_object((response_value)).float().cpu().numpy())
                 table["score"].extend(self.accelerator.gather(score).float().cpu().numpy())
 
