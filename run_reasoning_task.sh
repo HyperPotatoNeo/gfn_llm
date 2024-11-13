@@ -19,7 +19,7 @@ source llm_gfn_git/bin/activate
 echo "running script.."
 cd $HOME/scratch/gfn_llm/
 
-python3 examples/scripts/rloo/rloo_GSM8K.py \
+python3 examples/scripts/rloo/rloo_GSM8K_vllm.py \
     --learning_rate 3e-6 \
     --output_dir models/GSM8K/ppo \
     --per_device_train_batch_size 1 \
@@ -27,5 +27,7 @@ python3 examples/scripts/rloo/rloo_GSM8K.py \
     --total_episodes 30000 \
     --model_name_or_path microsoft/rho-math-1b-v0.1 \
     --sft_model_path realtreetune/rho-1b-sft-GSM8K \
+    --non_eos_penalty \
     --stop_token eos \
-    --response_length 1024
+    --response_length 512 \
+    --sanity_check
