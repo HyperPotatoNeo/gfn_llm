@@ -17,7 +17,7 @@ from trl.trainer.utils import SIMPLE_QUERY_CHAT_TEMPLATE
 import re
 import torch
 from vllm import LLM, SamplingParams
-
+from utils import WandbLogModelConfig
 
 """
 module unload anaconda
@@ -48,7 +48,7 @@ python3 examples/scripts/rloo/rloo_GSM8K_vllm.py \
 
 
 if __name__ == "__main__":
-    wandb.init(project='trl', entity='johan0730')
+    # wandb.init(project='trl')
     parser = HfArgumentParser((RLOOConfig, ModelConfig))
     config, model_config = parser.parse_args_into_dataclasses()
     # remove output_dir if exists
@@ -92,15 +92,14 @@ if __name__ == "__main__":
     # # Clear GPU memory before starting
     # torch.cuda.empty_cache()
     # torch.cuda.synchronize()
-    llm = LLM(
-        model=config.sft_model_path,       # Path to the model
-        dtype=torch.float16,               # Use mixed precision (FP16)
-        enforce_eager=True,                # Disable CUDA graphs for reduced memory usage
-        max_model_len=512,                # Example: set max input length for the model ->1024
-        gpu_memory_utilization=0.1,        # Limit GPU memory usage (optional)
-        tensor_parallel_size=1,            # Example: set tensor parallelism (optional)
-        #device="cuda:1",
-    )
+    # llm = LLM(
+    #     model=config.sft_model_path,       # Path to the model
+    #     # enforce_eager=True,                # Disable CUDA graphs for reduced memory usage
+    #     max_model_len=512,                # Example: set max input length for the model ->1024
+    #     gpu_memory_utilization=0.9,        # Limit GPU memory usage (optional)
+    #     tensor_parallel_size=1,            # Example: set tensor parallelism (optional)
+    #     device="cuda:3",
+    # )
 
     ################
     # Dataset
@@ -153,10 +152,11 @@ if __name__ == "__main__":
         config=config,
         tokenizer=tokenizer,
         policy=policy,
-        vllm_policy=llm,
+        # vllm_policy=llm,
         ref_policy=ref_policy,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
+        callbacks=[WandbLogModelConfig(model_config)]
     )
     trainer.train()
     trainer.save_model(config.output_dir)

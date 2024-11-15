@@ -39,7 +39,8 @@ from .utils import (
 )
 from .rloo_config import RLOOConfig
 import re
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams, LLM
+from trl.vllm_utils import vllm_single_gpu_patch
 import random
 
 INVALID_LOGPROB = 1.0
@@ -54,7 +55,7 @@ class RLOOTrainerReasoning(Trainer):
         config: RLOOConfig,
         tokenizer: PreTrainedTokenizer,
         policy: nn.Module,
-        vllm_policy: nn.Module,
+        # vllm_policy: nn.Module,
         ref_policy: nn.Module,
         train_dataset: Dataset,
         data_collator: Optional[DataCollatorWithPadding] = None,
@@ -171,7 +172,29 @@ class RLOOTrainerReasoning(Trainer):
             drop_last=True,
         )  # no need to shuffle eval dataset
         self.eval_dataloader = accelerator.prepare(self.eval_dataloader)
+        vllm_single_gpu_patch()
+        self.sampling_params = SamplingParams(
+            temperature=args.temperature,
+            top_p=1.0,
+            max_tokens=args.response_length,
+            include_stop_str_in_output=True,
+            logprobs=1,
+        )
+        if accelerator.is_main_process:
+            self.llm = LLM(
+                model=args.sft_model_path,
+                # revision=args.sft_model_revision,
+                # tokenizer_revision=args.sft_model_revision,
+                tensor_parallel_size=1,
+                device=f"cuda:{accelerator.num_processes}",
+            )
+            self.llmp = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+            print("🔥🔥🔥 vllm loaded")
+        else:
+            print("waiting for vllm to spin up...")
         
+        accelerator.wait_for_everyone()
+
         if self.is_deepspeed_enabled:
             self.ref_policy = prepare_deepspeed(
                 self.ref_policy, args.per_device_train_batch_size, args.bf16, args.fp16
@@ -185,12 +208,6 @@ class RLOOTrainerReasoning(Trainer):
             print(f"Memory reserved: {reserved / (1024**3):.2f} GB")
             self.ref_policy = self.ref_policy.to(self.accelerator.device)
         if accelerator.is_main_process:
-            #self.llm = SingleGPULLM(
-            #import pdb; pdb.set_trace()
-            # revision=args.sft_model_revision,
-            # tokenizer_revision=args.sft_model_revision,
-            #self.llm = LLM(model=args.sft_model_path, tensor_parallel_size=1, device=f"cuda:{accelerator.num_processes}",)
-            self.llm = vllm_policy
             self.llmp = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
         else:
             print("waiting for vllm to spin up...")
@@ -537,7 +554,7 @@ class RLOOTrainerReasoning(Trainer):
                 metrics["objective/non_score_reward"] = self.accelerator.gather(mean_non_score_reward).mean().item()
                 metrics["objective/rlhf_reward"] = self.accelerator.gather(rlhf_reward).mean().item()
                 metrics["objective/scores"] = self.accelerator.gather(scores.mean()).mean().item()
-                metrics["objective/accuracies"] = self.accelerator.gather(accuracies[0]).item()
+                metrics["objective/accuracies"] = self.accelerator.gather(accuracies[0].mean()).item()
                 metrics["policy/approxkl_avg"] = self.accelerator.gather(approxkl_stats).mean().item()
                 metrics["policy/clipfrac_avg"] = self.accelerator.gather(pg_clipfrac_stats).mean().item()
                 metrics["loss/policy_avg"] = self.accelerator.gather(pg_loss_stats).mean().item()
@@ -593,9 +610,9 @@ class RLOOTrainerReasoning(Trainer):
                         outputs = self.llm.generate(prompt_token_ids=g_queries_list, sampling_params=self.sampling_params)
                         padded_response_token_ids = []
                         for output in outputs:
-                            token_ids = output.outputs[0].token_ids
-                            if isinstance(token_ids, tuple):
-                                token_ids = list(token_ids)
+                            token_ids = output.outputs[0].token_ids.tolist()
+                            # if isinstance(token_ids, tuple):
+                            #     token_ids = list(token_ids)
                             padded_token_ids = token_ids + [tokenizer.pad_token_id] * (
                                 args.response_length - len(token_ids)
                             )
