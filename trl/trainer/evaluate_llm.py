@@ -49,6 +49,11 @@ python3 trl/trainer/evaluate_llm.py \
     --sanity_check
 
 python3 trl/trainer/evaluate_llm.py \
+    --output_dir models/GSM8K/ppo2 \
+    --sft_model_path johanobandoc/rlooG \
+    --sanity_check    
+    
+python3 trl/trainer/evaluate_llm.py \
     --output_dir models/GSM8K/ppo \
     --sft_model_path realtreetune/deepseekmath-7b-sft-GSM8K \
     --sanity_check
@@ -73,23 +78,22 @@ if __name__ == "__main__":
         config.sft_model_path,
     )
     # Add missing special tokens if necessary
-    if tokenizer.pad_token_id is None:
-        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+    # if tokenizer.pad_token_id is None:
+    #     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-    if tokenizer.eos_token_id is None:
-        tokenizer.add_special_tokens({"eos_token": "<eos>"})
-    
+    # if tokenizer.eos_token_id is None:
+    #     tokenizer.add_special_tokens({"eos_token": "<eos>"})
     policy = AutoModelForCausalLM.from_pretrained(
         config.sft_model_path, trust_remote_code=model_config.trust_remote_code
     )
     # Align padding tokens between tokenizer and model
-    policy.config.pad_token_id = tokenizer.pad_token_id
-    policy.config.eos_token_id = tokenizer.eos_token_id
+    # policy.config.pad_token_id = tokenizer.pad_token_id
+    # policy.config.eos_token_id = tokenizer.eos_token_id
 
     #tokenizer.pad_token = tokenizer.eos_token
     # BOS and EOS tokens (check if your model defines them explicitly).
-    bos_token = tokenizer.bos_token or "<bos>"
-    eos_token = tokenizer.eos_token or "<eos>"
+    # bos_token = tokenizer.bos_token or "<bos>"
+    # eos_token = tokenizer.eos_token or "<eos>"
 
     llm = LLM(model=config.sft_model_path)
 
@@ -173,7 +177,7 @@ if __name__ == "__main__":
         logits = output.logits  # Logits for each token in the sequences
         return logits
 
-    type = 'eval'
+    type = 'train'
     if type == 'eval':
         print('===Eval Dataset:', type)
         queries = eval_dataset["input_ids"]
@@ -194,7 +198,7 @@ if __name__ == "__main__":
     top_p = 0.9
     use_original_format = False
     top_k = 50
-    hf_implementation = True
+    hf_implementation = False
 
     print("===response_length:", response_length)
     print("===temperature:", temperature)
