@@ -295,7 +295,7 @@ class RLOOTrainerReasoning(Trainer):
 
         )
 
-        response_length = 512#1024
+        response_length = 1024
         temperature = 0.35
         top_p = 0.9
         top_k = 50
@@ -366,9 +366,7 @@ class RLOOTrainerReasoning(Trainer):
                         
                         padded_response_token_ids = []
                         for output in outputs:
-                            token_ids = output.outputs[0].token_ids
-                            if isinstance(token_ids, tuple):
-                                token_ids = list(token_ids)
+                            token_ids = output.outputs[0].token_ids.tolist()
                             DUMMY_PAD_TOKEN = 0  # we can't use tokenizer.pad_token_id because it's outside vocab and `torch.gather(all_logprob, 2, response.unsqueeze(-1))` will error out
                             padded_token_ids = token_ids + [DUMMY_PAD_TOKEN] * (args.response_length - len(token_ids))
                             padded_response_token_ids.append(padded_token_ids)
@@ -554,7 +552,6 @@ class RLOOTrainerReasoning(Trainer):
                 metrics["objective/non_score_reward"] = self.accelerator.gather(mean_non_score_reward).mean().item()
                 metrics["objective/rlhf_reward"] = self.accelerator.gather(rlhf_reward).mean().item()
                 metrics["objective/scores"] = self.accelerator.gather(scores.mean()).mean().item()
-                metrics["objective/accuracies"] = self.accelerator.gather(accuracies[0].mean()).item()
                 metrics["policy/approxkl_avg"] = self.accelerator.gather(approxkl_stats).mean().item()
                 metrics["policy/clipfrac_avg"] = self.accelerator.gather(pg_clipfrac_stats).mean().item()
                 metrics["loss/policy_avg"] = self.accelerator.gather(pg_loss_stats).mean().item()
@@ -643,7 +640,7 @@ class RLOOTrainerReasoning(Trainer):
                 response_value =  torch.tensor(pred_answer).view(len(pred_answer), 1).to(self.accelerator.device)
                 score = (self.grade_answer(response_value, ground_truth)).squeeze(1) # binary_RM
                 table["query"].extend(gather_object(tokenizer.batch_decode(queries, skip_special_tokens=True)))
-                table["model response"].extend(gather_object((response_value)).float().cpu().numpy())
+                table["model response"].extend(self.accelerator.gather(response_value).float().cpu().numpy()) #TODO[Fix]
                 table["score"].extend(self.accelerator.gather(score).float().cpu().numpy())
 
             if sampling:
