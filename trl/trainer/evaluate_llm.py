@@ -78,22 +78,23 @@ if __name__ == "__main__":
         config.sft_model_path,
     )
     # Add missing special tokens if necessary
-    # if tokenizer.pad_token_id is None:
-    #     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+    if tokenizer.pad_token_id is None:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-    # if tokenizer.eos_token_id is None:
-    #     tokenizer.add_special_tokens({"eos_token": "<eos>"})
+    if tokenizer.eos_token_id is None:
+        tokenizer.add_special_tokens({"eos_token": "<eos>"})
+    
     policy = AutoModelForCausalLM.from_pretrained(
         config.sft_model_path, trust_remote_code=model_config.trust_remote_code
     )
     # Align padding tokens between tokenizer and model
-    # policy.config.pad_token_id = tokenizer.pad_token_id
-    # policy.config.eos_token_id = tokenizer.eos_token_id
+    policy.config.pad_token_id = tokenizer.pad_token_id
+    policy.config.eos_token_id = tokenizer.eos_token_id
 
     #tokenizer.pad_token = tokenizer.eos_token
     # BOS and EOS tokens (check if your model defines them explicitly).
-    # bos_token = tokenizer.bos_token or "<bos>"
-    # eos_token = tokenizer.eos_token or "<eos>"
+    bos_token = tokenizer.bos_token or "<bos>"
+    eos_token = tokenizer.eos_token or "<eos>"
 
     llm = LLM(model=config.sft_model_path)
 
@@ -177,7 +178,7 @@ if __name__ == "__main__":
         logits = output.logits  # Logits for each token in the sequences
         return logits
 
-    type = 'train'
+    type = 'eval'
     if type == 'eval':
         print('===Eval Dataset:', type)
         queries = eval_dataset["input_ids"]
