@@ -22,7 +22,7 @@ cd $HOME/scratch/gfn_llm/
 accelerate launch --config_file examples/accelerate_configs/deepspeed_zero2.yaml \
     --num_processes 2 \
     examples/scripts/rloo/rloo_GSM8K_vllm.py \
-    --learning_rate 3e-6 \
+    --learning_rate 2e-6 \
     --output_dir models/GSM8K/ppo \
     --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 16 \
