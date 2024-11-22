@@ -31,6 +31,21 @@ source llm_gfn_git/bin/activate
 echo "running script.."
 cd $HOME/scratch/gfn_llm/
 
+accelerate launch --config_file examples/accelerate_configs/deepspeed_zero2.yaml \
+    --num_processes 2 \
+    examples/scripts/rloo/rloo_GSM8K_vllm.py \
+    --learning_rate 2e-6 \
+    --output_dir models/GSM8K/ppo \
+    --per_device_train_batch_size 32 \
+    --gradient_accumulation_steps 16 \
+    --total_episodes 59760 \
+    --model_name_or_path microsoft/rho-math-1b-v0.1 \
+    --sft_model_path realtreetune/rho-1b-sft-GSM8K \
+    --non_eos_penalty \
+    --stop_token eos \
+    --response_length 512 \
+    --sanity_check
+
 python3 examples/scripts/rloo/rloo_GSM8K_vllm.py \
     --learning_rate 3e-6 \
     --output_dir models/GSM8K/ppo \
@@ -41,14 +56,14 @@ python3 examples/scripts/rloo/rloo_GSM8K_vllm.py \
     --sft_model_path realtreetune/rho-1b-sft-GSM8K \
     --non_eos_penalty \
     --stop_token eos \
-    --response_length 1024 \
+    --response_length 512 \
     --sanity_check
-    
 """
 
 
 if __name__ == "__main__":
     # wandb.init(project='trl')
+    #wandb.init(project='trl', entity='johan0730')
     parser = HfArgumentParser((RLOOConfig, ModelConfig))
     config, model_config = parser.parse_args_into_dataclasses()
     # remove output_dir if exists
@@ -141,8 +156,8 @@ if __name__ == "__main__":
             load_from_cache_file=not config.sanity_check,
         )
     
-    train_dataset = prepare_dataset(train_dataset, tokenizer)
-    eval_dataset = prepare_dataset(eval_dataset, tokenizer)
+    train_dataset = prepare_dataset(train_dataset, tokenizer) #7470 samples
+    eval_dataset = prepare_dataset(eval_dataset, tokenizer) #1320
 
     ################
     # Training
@@ -156,10 +171,13 @@ if __name__ == "__main__":
         ref_policy=ref_policy,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        callbacks=[WandbLogModelConfig(model_config)]
+        #callbacks=[WandbLogModelConfig(model_config)]
     )
     trainer.train()
+    print('===Saving Model ....')
     trainer.save_model(config.output_dir)
+    print('===Pushing to hub ....')
     if config.push_to_hub:
         trainer.push_to_hub()
+    print('===Generating completions ....')
     trainer.generate_completions()

@@ -181,13 +181,22 @@ class RLOOTrainerReasoning(Trainer):
             logprobs=1,
         )
         if accelerator.is_main_process:
-            self.llm = LLM(
-                model=args.sft_model_path,
-                # revision=args.sft_model_revision,
-                # tokenizer_revision=args.sft_model_revision,
-                tensor_parallel_size=1,
-                device=f"cuda:{accelerator.num_processes}",
-            )
+            if accelerator.num_processes > 1:
+                self.llm = LLM(
+                    model=args.sft_model_path,
+                    # revision=args.sft_model_revision,
+                    # tokenizer_revision=args.sft_model_revision,
+                    tensor_parallel_size=1,
+                    device=f"cuda:{accelerator.num_processes}",
+                )
+            else:
+                self.llm = LLM(
+                    model=args.sft_model_path,
+                    # revision=args.sft_model_revision,
+                    gpu_memory_utilization=0.2,
+                    tensor_parallel_size=1,
+                    device="cuda:0",
+                )
             self.llmp = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
             print("🔥🔥🔥 vllm loaded")
         else:
@@ -295,14 +304,14 @@ class RLOOTrainerReasoning(Trainer):
 
         )
 
-        response_length = 1024
+        #response_length = 512
         temperature = 0.35
         top_p = 0.9
         top_k = 50
         self.sampling_params = SamplingParams(temperature=temperature, 
                                          top_p=top_p, 
                                          top_k=top_k,
-                                         max_tokens=response_length, stop="\n\n\nProblem:")
+                                         max_tokens=args.response_length, stop="\n\n\nProblem:")
 
         accelerator.print("===training policy===")
         global_step = 0
@@ -388,6 +397,7 @@ class RLOOTrainerReasoning(Trainer):
                         #query = queries[i : i + args.local_rollout_forward_batch_size]
                         query_response = queries_responses[i : i + args.local_rollout_forward_batch_size]
                         response = query_response[:, context_length:]
+                        response_d_mini= response_d[i : i + args.local_rollout_forward_batch_size]
 
                         output = forward(unwrapped_model, query_response, tokenizer.pad_token_id)
                         # decoded_text = tokenizer.batch_decode(response, skip_special_tokens=False)
@@ -425,7 +435,7 @@ class RLOOTrainerReasoning(Trainer):
                                                                      use_original_format=False)
                         #response_d
                         response_value =  torch.tensor(pred_answer).view(len(pred_answer), 1).to(device)
-                        score = (self.grade_answer(response_value, response_d)).squeeze(1) # binary_RM
+                        score = (self.grade_answer(response_value, response_d_mini)).squeeze(1) # binary_RM
 
                         correct_predictions = score.sum()
                         # Calculate accuracy using the sum of correct predictions divided by the total number of predictions
