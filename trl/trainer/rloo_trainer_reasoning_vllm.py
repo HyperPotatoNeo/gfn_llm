@@ -442,7 +442,6 @@ class RLOOTrainerReasoning(Trainer):
                         total_predictions = len(score)  # or ground_truth.size(0) for number of rows
                         accuracy = correct_predictions / total_predictions
                         print("===Accuracy:", accuracy)
-                        sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
                         query_responses.append(query_response)
                         responses.append(response)
                         postprocessed_responses.append(postprocessed_response)

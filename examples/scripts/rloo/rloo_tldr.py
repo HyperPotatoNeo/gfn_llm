@@ -10,10 +10,10 @@ from transformers import (
     HfArgumentParser,
 )
 
-from trl import ModelConfig
+from trl.trainer import ModelConfig
 from trl.trainer.rloo_trainer import RLOOConfig, RLOOTrainer
 from trl.trainer.utils import SIMPLE_QUERY_CHAT_TEMPLATE
-
+import os
 
 """
 python examples/scripts/rloo/rloo_tldr.py \
@@ -49,7 +49,7 @@ accelerate launch --config_file examples/accelerate_configs/deepspeed_zero2.yaml
 
 
 if __name__ == "__main__":
-    wandb.init(project='trl', entity='swish')
+    #wandb.init(project='trl', entity='swish')
     parser = HfArgumentParser((RLOOConfig, ModelConfig))
     config, model_config = parser.parse_args_into_dataclasses()
     # remove output_dir if exists
@@ -78,7 +78,9 @@ if __name__ == "__main__":
     ################
     # Dataset
     ################
-    raw_datasets = load_dataset("trl-internal-testing/tldr-preference-sft-trl-style", cache_dir="/pscratch/sd/s/siddart2")
+    cache_dir = os.path.expanduser("~/scratch/gfn_llm/huggingface/datasets")
+    raw_datasets = load_dataset("trl-internal-testing/tldr-preference-sft-trl-style", cache_dir=cache_dir)
+
     if config.sanity_check:
         for key in raw_datasets:
             raw_datasets[key] = raw_datasets[key].select(range(1000))

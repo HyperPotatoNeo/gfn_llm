@@ -62,8 +62,7 @@ python3 examples/scripts/rloo/rloo_GSM8K_vllm.py \
 
 
 if __name__ == "__main__":
-    # wandb.init(project='trl')
-    #wandb.init(project='trl', entity='johan0730')
+    wandb.init(project='trl', entity='johan0730')
     parser = HfArgumentParser((RLOOConfig, ModelConfig))
     config, model_config = parser.parse_args_into_dataclasses()
     # remove output_dir if exists
@@ -84,7 +83,7 @@ if __name__ == "__main__":
     
     #torch.cuda.empty_cache() 
     
-    device_policy = torch.device("cuda:0")  # Assign to GPU 1
+    #device_policy = torch.device("cuda:0")  # Assign to GPU 1
     ref_policy = AutoModelForCausalLM.from_pretrained(
         config.sft_model_path, trust_remote_code=model_config.trust_remote_code
     )#.to(device_policy)  # Move to GPU 1
