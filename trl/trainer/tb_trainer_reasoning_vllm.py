@@ -430,16 +430,21 @@ class TBTrainerReasoning(Trainer):
                     
                     
                     for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size):
-                        query = queries[i : i + args.local_rollout_forward_batch_size]
-                        query_response, logits = generate(
-                            unwrapped_model,
-                            query,
-                            tokenizer.pad_token_id,
-                            generation_config,
-                        )
+                        # query = queries[i : i + args.local_rollout_forward_batch_size]
+                        # query_response, logits = generate(
+                        #     unwrapped_model,
+                        #     query,
+                        #     tokenizer.pad_token_id,
+                        #     generation_config,
+                        # )
+                        query_response = queries_responses[i : i + args.local_rollout_forward_batch_size]
                         response = query_response[:, context_length:]
                         response_d_mini= response_d[i : i + args.local_rollout_forward_batch_size]
-
+                        output = forward(unwrapped_model, query_response, tokenizer.pad_token_id)
+                        # decoded_text = tokenizer.batch_decode(response, skip_special_tokens=False)
+                        # pred_answer = self.extract_predicted_answers(decoded_text, use_original_format=False)
+                        logits = output.logits[:, context_length - 1 : -1]
+                        logits /= args.temperature + 1e-7
                         # use the logits during generation directly, instead of using the following
                         all_logprob = F.log_softmax(logits, dim=-1)
                         logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)

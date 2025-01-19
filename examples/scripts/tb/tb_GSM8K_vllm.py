@@ -62,7 +62,7 @@ python3 examples/scripts/tb/tb_GSM8K_vllm.py \
 
 
 if __name__ == "__main__":
-    wandb.init(project='trl', entity='johan0730')
+    # wandb.init(project='trl')
     parser = HfArgumentParser((TBConfig, ModelConfig))
     config, model_config = parser.parse_args_into_dataclasses()
     # remove output_dir if exists
